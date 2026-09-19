@@ -1,0 +1,6 @@
+{
+  "name": "BookLogic to PostgreSQL VPS Ingestion Studio",
+  "description": "Sync BookLogic PMS/OTA reservations, MarkSend acknowledgments, room availability, and rate updates directly into VPS PostgreSQL (72.61.240.34, BOOKLOGIC database).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

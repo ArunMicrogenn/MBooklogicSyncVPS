@@ -1,0 +1,16 @@
+[Unit]
+Description=BookLogic Channel Manager Continuous 4-Phase Auto-Sync Daemon
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/html/booklogic
+ExecStart=/usr/bin/php /var/www/html/booklogic/cron_auto_sync.php --daemon --interval=60
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/booklogic/sync.log
+StandardError=append:/var/log/booklogic/sync_error.log
+
+[Install]
+WantedBy=multi-user.target
