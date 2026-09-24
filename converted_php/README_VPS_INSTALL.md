@@ -2,7 +2,7 @@
 
 Target Server: **72.61.240.34**  
 Database: **BOOKLOGIC** (PostgreSQL)  
-API Endpoint: `https://xrs.booklogic.net/ws/external-pms/microgenn`
+API Endpoint: `https://stage-xrs.booklogic.net/ws/external-pms/microgenn`
 
 ---
 

@@ -25,8 +25,8 @@ ini_set('max_execution_time', 0);
 // Include PostgreSQL Database Connection
 include_once __DIR__ . '/db.php';
 
-// BookLogic Channel Manager API URL
-$api_url = getenv('BOOKLOGIC_API_URL') ?: (defined('BOOKLOGIC_API_URL') ? BOOKLOGIC_API_URL : 'https://xrs.booklogic.net/ws/external-pms/microgenn');
+// BookLogic Channel Manager API URL (Stage / Testing)
+$api_url = getenv('BOOKLOGIC_API_URL') ?: (defined('BOOKLOGIC_API_URL') ? BOOKLOGIC_API_URL : 'https://stage-xrs.booklogic.net/ws/external-pms/microgenn');
 if (!defined('BOOKLOGIC_API_URL')) {
     define('BOOKLOGIC_API_URL', $api_url);
 }

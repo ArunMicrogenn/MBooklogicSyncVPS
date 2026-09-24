@@ -14,7 +14,7 @@ date_default_timezone_set('UTC');
 
 require_once __DIR__ . '/db.php';
 
-$api_url = getenv('BOOKLOGIC_API_URL') ?: (defined('BOOKLOGIC_API_URL') ? BOOKLOGIC_API_URL : 'https://xrs.booklogic.net/ws/external-pms/microgenn');
+$api_url = getenv('BOOKLOGIC_API_URL') ?: (defined('BOOKLOGIC_API_URL') ? BOOKLOGIC_API_URL : 'https://stage-xrs.booklogic.net/ws/external-pms/microgenn');
 
 // Parse CLI options
 $options = getopt("", ["daemon", "interval::", "hotel::"]);

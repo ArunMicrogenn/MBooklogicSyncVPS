@@ -5,8 +5,7 @@ import { createServer as createViteServer } from 'vite';
 import pg from 'pg';
 import { XMLParser } from 'fast-xml-parser';
 import fs from 'fs';
-import * as archiverModule from 'archiver';
-const archiver = (archiverModule as any).default || archiverModule;
+import JSZip from 'jszip';
 import { FieldMapping, PostgresConfig, SyncLogEntry, PostgresColumnType } from './src/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1129,7 +1128,7 @@ app.post('/api/booklogic/sync-bookings', async (req, res) => {
 
       let responseText = '';
       try {
-        const blRes = await fetch('https://xrs.booklogic.net/ws/external-pms/microgenn', {
+        const blRes = await fetch('https://stage-xrs.booklogic.net/ws/external-pms/microgenn', {
           method: 'POST',
           headers: {
             'Content-Type': 'text/xml',
@@ -2059,27 +2058,30 @@ app.get('/api/booklogic/converted-files', (req, res) => {
 });
 
 // 18. Download Full VPS Deployment ZIP Package
-app.get('/api/booklogic/download-package', (req, res) => {
+app.get('/api/booklogic/download-package', async (req, res) => {
   try {
-    const archive = archiver('zip', {
-      zlib: { level: 9 }
-    });
-
-    res.attachment('booklogic-vps-deployment.zip');
-    res.setHeader('Content-Type', 'application/zip');
-
-    archive.on('error', (err: any) => {
-      res.status(500).send({ error: err.message });
-    });
-
-    archive.pipe(res);
-
+    const zip = new JSZip();
     const convertedDir = path.join(__dirname, 'converted_php');
     if (fs.existsSync(convertedDir)) {
-      archive.directory(convertedDir, false);
+      const files = fs.readdirSync(convertedDir);
+      for (const file of files) {
+        const filePath = path.join(convertedDir, file);
+        if (fs.statSync(filePath).isFile()) {
+          zip.file(file, fs.readFileSync(filePath));
+        }
+      }
     }
 
-    archive.finalize();
+    const zipBuffer = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="booklogic-vps-deployment.zip"');
+    res.setHeader('Content-Length', zipBuffer.length);
+    res.send(zipBuffer);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

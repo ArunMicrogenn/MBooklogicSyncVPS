@@ -24,8 +24,8 @@ try {
     die("PostgreSQL Connection Failed to {$host}: " . $e->getMessage());
 }
 
-// BookLogic Channel Manager API Endpoint
-$api_url = getenv('BOOKLOGIC_API_URL') ?: 'https://xrs.booklogic.net/ws/external-pms/microgenn';
+// BookLogic Channel Manager API Endpoint (Stage / Testing)
+$api_url = getenv('BOOKLOGIC_API_URL') ?: 'https://stage-xrs.booklogic.net/ws/external-pms/microgenn';
 if (!defined('BOOKLOGIC_API_URL')) {
     define('BOOKLOGIC_API_URL', $api_url);
 }

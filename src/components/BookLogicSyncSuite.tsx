@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import JSZip from 'jszip';
 import {
   Server,
   Database,
@@ -30,7 +31,8 @@ import {
   HardDrive,
   FolderArchive,
   ExternalLink,
-  Cpu
+  Cpu,
+  FileDown
 } from 'lucide-react';
 import { SyncLogEntry } from '../types';
 
@@ -138,6 +140,7 @@ export const BookLogicSyncSuite: React.FC<BookLogicSyncSuiteProps> = ({ onNaviga
     serviceFile: '',
   });
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [isDownloadingZip, setIsDownloadingZip] = useState(false);
   const [activeCodeTab, setActiveCodeTab] = useState<'installVpsSh' | 'readmeMd' | 'serviceFile' | 'cronPhp' | 'indexPhp' | 'dbPhp' | 'syncPhp' | 'schemaSql'>('installVpsSh');
 
   // Test VPS Connection
@@ -370,7 +373,7 @@ export const BookLogicSyncSuite: React.FC<BookLogicSyncSuiteProps> = ({ onNaviga
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  // Download file helper
+  // Download single file helper
   const handleDownload = (filename: string, content: string) => {
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -381,6 +384,59 @@ export const BookLogicSyncSuite: React.FC<BookLogicSyncSuiteProps> = ({ onNaviga
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+  };
+
+  // Client-Side 100% Valid ZIP Package Builder (using JSZip)
+  const handleDownloadZipPackage = async () => {
+    setIsDownloadingZip(true);
+    try {
+      let files = convertedCode;
+      if (!files.installVpsSh || !files.dbPhp) {
+        const { ok, data } = await fetchJsonSafe('/api/booklogic/converted-files');
+        if (ok && data?.success) {
+          files = {
+            indexPhp: data.indexPhp || '',
+            dbPhp: data.dbPhp || '',
+            syncPhp: data.syncPhp || '',
+            cronPhp: data.cronPhp || '',
+            schemaSql: data.schemaSql || '',
+            installVpsSh: data.installVpsSh || '',
+            readmeMd: data.readmeMd || '',
+            serviceFile: data.serviceFile || '',
+          };
+          setConvertedCode(files);
+        }
+      }
+
+      const zip = new JSZip();
+      zip.file('install_vps.sh', files.installVpsSh || '#!/usr/bin/env bash\n');
+      zip.file('README_VPS_INSTALL.md', files.readmeMd || '# BookLogic VPS Install\n');
+      zip.file('booklogic-sync.service', files.serviceFile || '[Unit]\n');
+      zip.file('cron_auto_sync.php', files.cronPhp || '<?php\n');
+      zip.file('index.php', files.indexPhp || '<?php\n');
+      zip.file('db.php', files.dbPhp || '<?php\n');
+      zip.file('sync_booklogic.php', files.syncPhp || '<?php\n');
+      zip.file('schema.sql', files.schemaSql || '-- PostgreSQL Schema\n');
+
+      const blob = await zip.generateAsync({
+        type: 'blob',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 },
+      });
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'booklogic-vps-deployment.zip';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (err: any) {
+      alert('Failed to generate ZIP package: ' + (err.message || 'Unknown error'));
+    } finally {
+      setIsDownloadingZip(false);
+    }
   };
 
   useEffect(() => {
@@ -442,24 +498,27 @@ export const BookLogicSyncSuite: React.FC<BookLogicSyncSuiteProps> = ({ onNaviga
               <span className="px-2.5 py-0.5 text-xs font-mono rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                 SQL Server &rarr; PostgreSQL (72.61.240.34)
               </span>
+              <span className="px-2.5 py-0.5 text-xs font-mono rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                API Endpoint: stage-xrs.booklogic.net (Testing)
+              </span>
             </div>
             <h2 className="text-xl font-bold text-slate-100 font-sans tracking-tight">
               BookLogic Ingestion &amp; Room Availability Engine
             </h2>
             <p className="text-sm text-slate-400 mt-1 max-w-2xl">
-              Target VPS: <span className="text-cyan-300 font-mono font-medium">72.61.240.34</span> | Database: <span className="text-cyan-300 font-mono font-medium">BOOKLOGIC</span> | Password: <span className="text-cyan-300 font-mono font-medium">mgenn</span>
+              Target VPS: <span className="text-cyan-300 font-mono font-medium">72.61.240.34</span> | Database: <span className="text-cyan-300 font-mono font-medium">BOOKLOGIC</span> | Staging API: <span className="text-amber-300 font-mono text-xs">https://stage-xrs.booklogic.net/ws/external-pms/microgenn</span>
             </p>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            <a
-              href="/api/booklogic/download-package"
-              download="booklogic-vps-deployment.zip"
-              className="flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer shadow-md shadow-emerald-600/20 transition-all active:scale-95"
+            <button
+              onClick={handleDownloadZipPackage}
+              disabled={isDownloadingZip}
+              className="flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer shadow-md shadow-emerald-600/20 transition-all active:scale-95 disabled:opacity-60"
             >
-              <Package className="w-3.5 h-3.5" />
-              <span>Download VPS Package (.ZIP)</span>
-            </a>
+              <Package className={`w-3.5 h-3.5 ${isDownloadingZip ? 'animate-spin' : ''}`} />
+              <span>{isDownloadingZip ? 'Preparing ZIP...' : 'Download VPS Package (.ZIP)'}</span>
+            </button>
 
             <button
               onClick={handleTestVps}
@@ -637,14 +696,14 @@ export const BookLogicSyncSuite: React.FC<BookLogicSyncSuiteProps> = ({ onNaviga
               </div>
 
               <div className="flex flex-col sm:flex-row gap-3">
-                <a
-                  href="/api/booklogic/download-package"
-                  download="booklogic-vps-deployment.zip"
-                  className="flex items-center justify-center gap-2.5 px-5 py-3 text-sm font-bold rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 cursor-pointer shadow-lg shadow-emerald-500/20 active:scale-95 transition-all text-center"
+                <button
+                  onClick={handleDownloadZipPackage}
+                  disabled={isDownloadingZip}
+                  className="flex items-center justify-center gap-2.5 px-5 py-3 text-sm font-bold rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 cursor-pointer shadow-lg shadow-emerald-500/20 active:scale-95 transition-all text-center disabled:opacity-60"
                 >
-                  <Download className="w-4 h-4 stroke-[2.5]" />
-                  <span>Download Full ZIP Package</span>
-                </a>
+                  <Download className={`w-4 h-4 stroke-[2.5] ${isDownloadingZip ? 'animate-spin' : ''}`} />
+                  <span>{isDownloadingZip ? 'Building ZIP Archive...' : 'Download Full ZIP Package'}</span>
+                </button>
               </div>
             </div>
 
@@ -892,6 +951,42 @@ export const BookLogicSyncSuite: React.FC<BookLogicSyncSuiteProps> = ({ onNaviga
                   {activeCodeTab === 'schemaSql' && (convertedCode.schemaSql || '-- Loading schema.sql...')}
                 </code>
               </pre>
+            </div>
+
+            {/* Individual File 1-Click Downloads Grid */}
+            <div className="pt-2">
+              <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5 mb-2.5">
+                <FileDown className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Download Individual Files (No Unzipping Required):</span>
+              </span>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {[
+                  { name: 'install_vps.sh', content: convertedCode.installVpsSh, desc: 'Bash Installer' },
+                  { name: 'README_VPS_INSTALL.md', content: convertedCode.readmeMd, desc: 'Install Guide' },
+                  { name: 'booklogic-sync.service', content: convertedCode.serviceFile, desc: 'Systemd Service' },
+                  { name: 'index.php', content: convertedCode.indexPhp, desc: 'Web Dashboard' },
+                  { name: 'cron_auto_sync.php', content: convertedCode.cronPhp, desc: 'Daemon Script' },
+                  { name: 'db.php', content: convertedCode.dbPhp, desc: 'PostgreSQL PDO' },
+                  { name: 'sync_booklogic.php', content: convertedCode.syncPhp, desc: 'Pipeline Core' },
+                  { name: 'schema.sql', content: convertedCode.schemaSql, desc: 'PostgreSQL DDL' },
+                ].map((item) => (
+                  <button
+                    key={item.name}
+                    onClick={() => handleDownload(item.name, item.content || '')}
+                    className="flex flex-col items-start p-2.5 rounded-lg bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-cyan-500/30 transition-all text-left group cursor-pointer"
+                  >
+                    <div className="flex items-center justify-between w-full">
+                      <span className="font-mono text-xs font-medium text-cyan-300 group-hover:text-cyan-200 truncate">
+                        {item.name}
+                      </span>
+                      <Download className="w-3 h-3 text-slate-500 group-hover:text-cyan-400 shrink-0 ml-1" />
+                    </div>
+                    <span className="text-[10px] text-slate-500 group-hover:text-slate-400 mt-0.5 font-sans">
+                      {item.desc}
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         </div>
