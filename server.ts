@@ -806,7 +806,7 @@ function getBookLogicPgConfig(customConfig?: any): pg.ClientConfig {
 // In-memory BookLogic sandbox state for instant visual testing if VPS firewall / remote connection is pending
 const bookLogicSandbox = {
   hotels: [
-    { HotelCode: 'BL_DEMO_01', Username: 'microgenn_demo', Password: 'DemoPassword123', Inactive: 0, created_at: new Date().toISOString() }
+    { HotelCode: 'IZM2366', Username: 'MicrogennPMS', Password: 'DU4rbc2A', Inactive: 0, created_at: new Date().toISOString() }
   ],
   reservations: [] as any[],
   details: [] as any[],
@@ -814,10 +814,10 @@ const bookLogicSandbox = {
   perDay: [] as any[],
   markSendResponses: [] as any[],
   availability: [
-    { avaidd: 1, hotelcode: 'BL_DEMO_01', allotcode: 'DLX_01', fromdate: '2026-10-01', todate: '2026-10-05', Availablerooms: '10', stopsales: '0', uploadflg: 0 }
+    { avaidd: 1, hotelcode: 'IZM2366', allotcode: 'DLX_01', fromdate: '2026-10-01', todate: '2026-10-05', Availablerooms: '10', stopsales: '0', uploadflg: 0 }
   ],
   rates: [
-    { rmrateid: 1, hotelcode: 'BL_DEMO_01', rateid: 'BAR_STD', fromdate: '2026-10-01', todate: '2026-10-05', cancelpolicyid: 'CP_STD', paymentpolicyid: 'PP_STD', singlerent: '120.00', doublerent: '150.00', triplerent: '190.00', Quartertriplerent: '230.00', uploadflg: 0, notuploadflg: 0, remarks: '' }
+    { rmrateid: 1, hotelcode: 'IZM2366', rateid: 'BAR_STD', fromdate: '2026-10-01', todate: '2026-10-05', cancelpolicyid: 'CP_STD', paymentpolicyid: 'PP_STD', singlerent: '120.00', doublerent: '150.00', triplerent: '190.00', Quartertriplerent: '230.00', uploadflg: 0, notuploadflg: 0, remarks: '' }
   ]
 };
 
@@ -2055,6 +2055,21 @@ app.get('/api/booklogic/converted-files', (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Static file serving for converted_php files
+app.use('/converted_php', express.static(path.join(__dirname, 'converted_php')));
+app.get('/cron_auto_sync.php', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.sendFile(path.join(__dirname, 'converted_php/cron_auto_sync.php'));
+});
+app.get('/db.php', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.sendFile(path.join(__dirname, 'converted_php/db.php'));
+});
+app.get('/sync_booklogic.php', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.sendFile(path.join(__dirname, 'converted_php/sync_booklogic.php'));
 });
 
 // 18. Download Full VPS Deployment ZIP Package

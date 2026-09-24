@@ -218,3 +218,9 @@ CREATE TABLE IF NOT EXISTS "Reservation_PerDay_details_log" (
     "Res_id" INTEGER,
     "created_at" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Seed Active Hotel for BookLogic Staging / Production
+INSERT INTO "Mas_Hotel" ("HotelCode", "Username", "Password", "Inactive")
+VALUES ('IZM2366', 'MicrogennPMS', 'DU4rbc2A', 0)
+ON CONFLICT ("HotelCode") DO UPDATE 
+SET "Username" = EXCLUDED."Username", "Password" = EXCLUDED."Password", "Inactive" = 0;

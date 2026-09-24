@@ -51,7 +51,7 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
         }
 
         // =========================================================================
-        // PHASE 1: FETCH NEW BOOKINGS FROM BOOKLOGIC API (<syncBookingRQ>)
+        // PHASE 1: FETCH ALL BOOKINGS IN QUEUE (<syncBookingRQ> + Instant <markSendRQ>)
         // =========================================================================
         logCli("--- [PHASE 1] Fetching Bookings from BookLogic API ---");
         foreach ($hotels as $hotel) {
@@ -61,128 +61,195 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
 
             logCli("Querying BookLogic API for Hotel: {$hotelCode}...");
 
-            $curl = curl_init();
-            curl_setopt_array($curl, [
-                CURLOPT_URL => $api_url,
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT => 30,
-                CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
-                CURLOPT_CUSTOMREQUEST => "POST",
-                CURLOPT_POSTFIELDS => "<syncBookingRQ>\r\n<RequestorID>\r\n<UserName>{$username}</UserName>\r\n<Password>{$password}</Password>\r\n</RequestorID>\r\n<hotelCode>{$hotelCode}</hotelCode>\r\n</syncBookingRQ>",
-                CURLOPT_HTTPHEADER => ["content-type: text/xml"],
-            ]);
-            $response = curl_exec($curl);
-            $err = curl_error($curl);
-            curl_close($curl);
+            $maxQueueIterations = 50; // Safety limit per cycle
+            $iteration = 0;
 
-            if ($err) {
-                logCli("cURL error fetching bookings for {$hotelCode}: $err", "ERROR");
-                continue;
-            }
+            while ($iteration < $maxQueueIterations) {
+                $iteration++;
+                $curl = curl_init();
+                curl_setopt_array($curl, [
+                    CURLOPT_URL => $api_url,
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_TIMEOUT => 35,
+                    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+                    CURLOPT_CUSTOMREQUEST => "POST",
+                    CURLOPT_POSTFIELDS => "<syncBookingRQ>\r\n<RequestorID>\r\n<UserName>{$username}</UserName>\r\n<Password>{$password}</Password>\r\n</RequestorID>\r\n<hotelCode>{$hotelCode}</hotelCode>\r\n</syncBookingRQ>",
+                    CURLOPT_HTTPHEADER => ["content-type: text/xml; charset=utf-8"],
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_SSL_VERIFYHOST => false,
+                ]);
+                $response = curl_exec($curl);
+                $err = curl_error($curl);
+                curl_close($curl);
 
-            $xml = @simplexml_load_string($response, 'SimpleXMLElement', LIBXML_NOCDATA);
-            if (!$xml) {
-                logCli("Invalid XML payload received for Hotel: {$hotelCode}", "WARN");
-                continue;
-            }
-
-            $data = json_decode(json_encode($xml), true);
-            $bookings = [];
-            if (!empty($data['Hotel']['Booking'])) {
-                $rawB = $data['Hotel']['Booking'];
-                $bookings = isset($rawB['Booking_Id']) ? [$rawB] : $rawB;
-            }
-
-            logCli("Found " . count($bookings) . " booking(s) for Hotel {$hotelCode}");
-
-            foreach ($bookings as $b) {
-                $bookingId = $b['Booking_Id'] ?? null;
-                $syncType  = $b['syncType'] ?? 'N';
-                if (!$bookingId) continue;
-
-                // Check duplicate
-                $chk = $pdo->prepare("SELECT \"Res_id\" FROM \"Reservations\" WHERE \"Booking_Id\" = :bid AND \"syncType\" = :st LIMIT 1");
-                $chk->execute([':bid' => $bookingId, ':st' => $syncType]);
-                if ($chk->fetch()) {
-                    continue; // Already processed
+                if ($err) {
+                    logCli("cURL error fetching bookings for {$hotelCode}: $err", "ERROR");
+                    break;
                 }
 
-                $pdo->beginTransaction();
-                try {
-                    $insRes = $pdo->prepare("
-                        INSERT INTO \"Reservations\" (
-                            \"Hotel_Code\", \"Booking_Id\", \"syncType\", \"PnrID\", \"ExternalReference\",
-                            \"deposit\", \"Service\", \"TravelagentName\", \"UpdateDate\", \"Currency\",
-                            \"Status\", \"Adult\", \"Remarks\", \"Insertdate\", \"MarkSend\"
-                        ) VALUES (
-                            :hc, :bid, :st, :pnr, :ext,
-                            :dep, :srv, :ta, :ud, :curr,
-                            :stat, :adult, :rem, NOW(), 0
-                        ) RETURNING \"Res_id\"
-                    ");
-                    $insRes->execute([
-                        ':hc' => $hotelCode,
-                        ':bid' => $bookingId,
-                        ':st' => $syncType,
-                        ':pnr' => $b['PnrID'] ?? 'PNR' . rand(1000, 9999),
-                        ':ext' => $b['ExternalReference'] ?? '',
-                        ':dep' => (float)($b['deposit'] ?? 0),
-                        ':srv' => $b['Service'] ?? '',
-                        ':ta' => $b['TravelagentName'] ?? 'BookLogic OTA',
-                        ':ud' => $b['UpdateDate'] ?? date('Y-m-d H:i:s'),
-                        ':curr' => $b['Currency'] ?? 'USD',
-                        ':stat' => $b['Status'] ?? 'Confirmed',
-                        ':adult' => (int)($b['Adult'] ?? 2),
-                        ':rem' => $b['Remarks'] ?? 'Auto-sync ingested'
-                    ]);
-                    $newResId = $insRes->fetchColumn();
+                $xml = @simplexml_load_string($response, 'SimpleXMLElement', LIBXML_NOCDATA);
+                if (!$xml) {
+                    logCli("Invalid or empty XML payload received for Hotel: {$hotelCode}", "WARN");
+                    break;
+                }
 
-                    // Insert Customer
-                    if (!empty($b['Customer'])) {
-                        $cust = $b['Customer'];
-                        $insCust = $pdo->prepare("
-                            INSERT INTO \"Reservation_Customer\" (\"Res_id\", \"FirstName\", \"LastName\", \"Email\", \"Tel\", \"Country\")
-                            VALUES (:rid, :fn, :ln, :em, :tel, :cnt)
-                        ");
-                        $insCust->execute([
-                            ':rid' => $newResId,
-                            ':fn' => $cust['FirstName'] ?? 'Valued',
-                            ':ln' => $cust['LastName'] ?? 'Guest',
-                            ':em' => $cust['Email'] ?? 'guest@example.com',
-                            ':tel' => $cust['Tel'] ?? '',
-                            ':cnt' => $cust['Country'] ?? 'US'
-                        ]);
-                    }
+                // Extract bookings flexibly regardless of XML root/hierarchy variations
+                $bookingsList = [];
+                if (isset($xml->Hotel->Bookings->Booking)) {
+                    $bookingsList = $xml->Hotel->Bookings->Booking;
+                } elseif (isset($xml->Hotel->Booking)) {
+                    $bookingsList = $xml->Hotel->Booking;
+                } elseif (isset($xml->Bookings->Booking)) {
+                    $bookingsList = $xml->Bookings->Booking;
+                }
 
-                    // Insert Details
-                    if (!empty($b['RoomDetails'])) {
-                        $rd = isset($b['RoomDetails']['Total']) ? [$b['RoomDetails']] : $b['RoomDetails'];
-                        foreach ($rd as $room) {
-                            $insDet = $pdo->prepare("
-                                INSERT INTO \"Reservations_details\" (
-                                    \"Res_id\", \"NoofRooms\", \"RoomType\", \"Checkindate\", \"Checkoutdate\", \"Total\", \"rate_name\"
+                $foundCount = count($bookingsList);
+                if ($foundCount === 0) {
+                    logCli("No more pending bookings in BookLogic queue for Hotel {$hotelCode}.");
+                    break;
+                }
+
+                logCli("Found {$foundCount} booking(s) in batch #{$iteration} for Hotel {$hotelCode}");
+
+                foreach ($bookingsList as $b) {
+                    $bAttrs = $b->attributes();
+                    $bookingId = (string)($bAttrs['id'] ?? $bAttrs['Booking_Id'] ?? $b->Booking_Id ?? $b->id ?? '');
+                    $syncType  = (string)($b->syncType ?? 'NEW');
+                    if (!$bookingId) continue;
+
+                    $pnrId      = (string)($b->PnrID ?? '');
+                    $extRef     = (string)($b->ExternalReference ?? '');
+                    $deposit    = (float)($b->deposit ?? 0);
+                    $service    = (string)($b->Service ?? '');
+                    $agentName  = (string)($b->TravelagentName ?? $b->TravelagentCode ?? 'BookLogic OTA');
+                    $updateDate = (string)($b->UpdateDate ?? date('Y-m-d H:i:s'));
+                    $currency   = (string)($b->Currency ?? 'USD');
+                    $status     = (string)($b->Status ?? 'Confirmed');
+                    $adult      = (int)($b->Adult ?? 2);
+                    $remarks    = (string)($b->Remarks ?? 'BookLogic Staging Sync');
+
+                    // Check duplicate
+                    $chk = $pdo->prepare("SELECT \"Res_id\" FROM \"Reservations\" WHERE \"Booking_Id\" = :bid AND \"syncType\" = :st LIMIT 1");
+                    $chk->execute([':bid' => $bookingId, ':st' => $syncType]);
+                    $existingResId = $chk->fetchColumn();
+
+                    $newResId = $existingResId;
+
+                    if (!$existingResId) {
+                        $pdo->beginTransaction();
+                        try {
+                            $insRes = $pdo->prepare("
+                                INSERT INTO \"Reservations\" (
+                                    \"Hotel_Code\", \"Booking_Id\", \"syncType\", \"PnrID\", \"ExternalReference\",
+                                    \"deposit\", \"Service\", \"TravelagentName\", \"UpdateDate\", \"Currency\",
+                                    \"Status\", \"Adult\", \"Remarks\", \"Insertdate\", \"MarkSend\"
                                 ) VALUES (
-                                    :rid, :nr, :rt, :cin, :cout, :tot, :rn
-                                )
+                                    :hc, :bid, :st, :pnr, :ext,
+                                    :dep, :srv, :ta, :ud, :curr,
+                                    :stat, :adult, :rem, NOW(), 0
+                                ) RETURNING \"Res_id\"
                             ");
-                            $insDet->execute([
-                                ':rid' => $newResId,
-                                ':nr' => (int)($room['NoofRooms'] ?? 1),
-                                ':rt' => $room['RoomType'] ?? 'Deluxe',
-                                ':cin' => $room['Checkindate'] ?? date('Y-m-d'),
-                                ':cout' => $room['Checkoutdate'] ?? date('Y-m-d', strtotime('+3 days')),
-                                ':tot' => (float)($room['Total'] ?? 150.00),
-                                ':rn' => $room['rate_name'] ?? 'Standard Rate'
+                            $insRes->execute([
+                                ':hc' => $hotelCode,
+                                ':bid' => $bookingId,
+                                ':st' => $syncType,
+                                ':pnr' => $pnrId,
+                                ':ext' => $extRef,
+                                ':dep' => $deposit,
+                                ':srv' => $service,
+                                ':ta' => $agentName,
+                                ':ud' => $updateDate,
+                                ':curr' => $currency,
+                                ':stat' => $status,
+                                ':adult' => $adult,
+                                ':rem' => $remarks
                             ]);
+                            $newResId = $insRes->fetchColumn();
+
+                            // Insert Customer
+                            if (isset($b->CL) || isset($b->Customer)) {
+                                $cust = $b->CL ?? $b->Customer;
+                                $insCust = $pdo->prepare("
+                                    INSERT INTO \"Reservation_Customer\" (\"Res_id\", \"FirstName\", \"LastName\", \"Email\", \"Tel\", \"Country\")
+                                    VALUES (:rid, :fn, :ln, :em, :tel, :cnt)
+                                ");
+                                $insCust->execute([
+                                    ':rid' => $newResId,
+                                    ':fn' => (string)($cust->FirstName ?? 'Valued'),
+                                    ':ln' => (string)($cust->LastName ?? 'Guest'),
+                                    ':em' => (string)($cust->Email ?? 'guest@example.com'),
+                                    ':tel' => (string)($cust->Tel ?? ''),
+                                    ':cnt' => (string)($cust->Country ?? 'US')
+                                ]);
+                            }
+
+                            // Insert Room Details
+                            $roomsList = [];
+                            if (isset($b->RoomDetails)) {
+                                $roomsList = is_array($b->RoomDetails) ? $b->RoomDetails : [$b->RoomDetails];
+                            } elseif (isset($b->Rooms) || isset($b->Room)) {
+                                $roomsList = [$b];
+                            }
+
+                            foreach ($roomsList as $room) {
+                                $insDet = $pdo->prepare("
+                                    INSERT INTO \"Reservations_details\" (
+                                        \"Res_id\", \"NoofRooms\", \"RoomType\", \"Checkindate\", \"Checkoutdate\", \"Total\", \"rate_name\"
+                                    ) VALUES (
+                                        :rid, :nr, :rt, :cin, :cout, :tot, :rn
+                                    )
+                                ");
+                                $insDet->execute([
+                                    ':rid' => $newResId,
+                                    ':nr' => (int)($room->Rooms ?? $room->NoofRooms ?? 1),
+                                    ':rt' => (string)($room->Room ?? $room->RoomType ?? 'Standard Room'),
+                                    ':cin' => (string)($room->Checkin ?? $room->Checkindate ?? date('Y-m-d')),
+                                    ':cout' => (string)($room->Checkout ?? $room->Checkoutdate ?? date('Y-m-d', strtotime('+1 day'))),
+                                    ':tot' => (float)($room->Total ?? $room->RoomTotal ?? 100.00),
+                                    ':rn' => (string)($room->rate ?? $room->rate_name ?? 'Standard Rate')
+                                ]);
+                            }
+
+                            $pdo->commit();
+                            $stats['bookings_inserted']++;
+                            logCli("Successfully ingested Booking ID: {$bookingId} (Postgres Res_id: {$newResId})", "SUCCESS");
+                        } catch (Exception $e) {
+                            $pdo->rollBack();
+                            logCli("Failed to save booking {$bookingId}: " . $e->getMessage(), "ERROR");
                         }
+                    } else {
+                        logCli("Booking [{$bookingId}] already in database (Res_id: {$existingResId}).");
                     }
 
-                    $pdo->commit();
-                    $stats['bookings_inserted']++;
-                    logCli("Successfully ingested Booking ID: {$bookingId} (Postgres Res_id: {$newResId})", "SUCCESS");
-                } catch (Exception $e) {
-                    $pdo->rollBack();
-                    logCli("Failed to save booking {$bookingId}: " . $e->getMessage(), "ERROR");
+                    // Acknowledge immediately to BookLogic so it advances the queue
+                    if ($pnrId && $newResId) {
+                        $markCurl = curl_init();
+                        curl_setopt_array($markCurl, [
+                            CURLOPT_URL => $api_url,
+                            CURLOPT_RETURNTRANSFER => true,
+                            CURLOPT_TIMEOUT => 25,
+                            CURLOPT_POST => true,
+                            CURLOPT_POSTFIELDS => "<markSendRQ>\r\n<RequestorID>\r\n<UserName>{$username}</UserName>\r\n<Password>{$password}</Password>\r\n</RequestorID>\r\n<hotelCode>{$hotelCode}</hotelCode>\r\n<PnrID>{$pnrId}</PnrID>\r\n<SrvNum>{$newResId}</SrvNum>\r\n</markSendRQ>",
+                            CURLOPT_HTTPHEADER => ["content-type: text/xml; charset=utf-8"],
+                            CURLOPT_SSL_VERIFYPEER => false,
+                            CURLOPT_SSL_VERIFYHOST => false,
+                        ]);
+                        curl_exec($markCurl);
+                        curl_close($markCurl);
+
+                        $pdo->prepare("UPDATE \"Reservations\" SET \"MarkSend\" = 1 WHERE \"Res_id\" = :rid")->execute([':rid' => $newResId]);
+                        $pdo->prepare("
+                            INSERT INTO \"MarkSend_Response\" (\"Hotel_Code\", \"Booking_id\", \"Service\", \"PnrID\", \"Message\", \"Type\")
+                            VALUES (:hc, :bid, :srv, :pnr, 'Auto-Sync Acknowledged', 'B')
+                        ")->execute([
+                            ':hc' => $hotelCode,
+                            ':bid' => $bookingId,
+                            ':srv' => (string)$newResId,
+                            ':pnr' => $pnrId
+                        ]);
+                        $stats['marksend_acked']++;
+                        logCli("MarkSend acknowledged for PnrID: {$pnrId} / Booking ID: {$bookingId}", "SUCCESS");
+                    }
                 }
             }
         }
