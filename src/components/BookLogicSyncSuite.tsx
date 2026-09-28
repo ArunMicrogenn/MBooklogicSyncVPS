@@ -498,15 +498,15 @@ export const BookLogicSyncSuite: React.FC<BookLogicSyncSuiteProps> = ({ onNaviga
               <span className="px-2.5 py-0.5 text-xs font-mono rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                 SQL Server &rarr; PostgreSQL (72.61.240.34)
               </span>
-              <span className="px-2.5 py-0.5 text-xs font-mono rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20">
-                API Endpoint: stage-xrs.booklogic.net (Testing)
+              <span className="px-2.5 py-0.5 text-xs font-mono rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                API Endpoint: xrs.booklogic.net (Live Production)
               </span>
             </div>
             <h2 className="text-xl font-bold text-slate-100 font-sans tracking-tight">
               BookLogic Ingestion &amp; Room Availability Engine
             </h2>
             <p className="text-sm text-slate-400 mt-1 max-w-2xl">
-              Target VPS: <span className="text-cyan-300 font-mono font-medium">72.61.240.34</span> | Database: <span className="text-cyan-300 font-mono font-medium">BOOKLOGIC</span> | Staging API: <span className="text-amber-300 font-mono text-xs">https://stage-xrs.booklogic.net/ws/external-pms/microgenn</span>
+              Target VPS: <span className="text-cyan-300 font-mono font-medium">72.61.240.34</span> | Database: <span className="text-cyan-300 font-mono font-medium">BOOKLOGIC</span> | Live API: <span className="text-emerald-300 font-mono text-xs">https://xrs.booklogic.net/ws/external-pms/microgenn</span>
             </p>
           </div>
 

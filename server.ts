@@ -1128,7 +1128,7 @@ app.post('/api/booklogic/sync-bookings', async (req, res) => {
 
       let responseText = '';
       try {
-        const blRes = await fetch('https://stage-xrs.booklogic.net/ws/external-pms/microgenn', {
+        const blRes = await fetch('https://xrs.booklogic.net/ws/external-pms/microgenn', {
           method: 'POST',
           headers: {
             'Content-Type': 'text/xml',
