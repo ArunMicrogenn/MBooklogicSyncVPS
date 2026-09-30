@@ -1102,10 +1102,10 @@ app.post('/api/booklogic/sync-bookings', async (req, res) => {
     try {
       pgClient = new pg.Client(config);
       await pgClient.connect();
-      const hRes = await pgClient.query('SELECT * FROM "Mas_Hotel" WHERE COALESCE("Inactive", 0) = 0;');
+      const hRes = await pgClient.query('SELECT hotelcode as "HotelCode", username as "Username", password as "Password", COALESCE(inactive, 0) as "Inactive" FROM mas_hotel WHERE COALESCE(inactive, 0) = 0;');
       hotels = hRes.rows;
       isLiveVps = true;
-      addLog('success', `Connected to PostgreSQL on ${config.host}:${config.port}/${config.database}. Found ${hotels.length} active hotel(s).`);
+      addLog('success', `Connected to PostgreSQL on ${config.host}:${config.port}/${config.database}. Found ${hotels.length} active hotel(s) from mas_hotel.`);
     } catch (dbErr: any) {
       addLog('warn', `Direct VPS connection note: ${dbErr.message}. Operating in high-fidelity Sandbox DB mode.`);
       hotels = bookLogicSandbox.hotels.filter(h => !h.Inactive);
@@ -1445,8 +1445,8 @@ app.post('/api/booklogic/sync-marksend', async (req, res) => {
       if (client) {
         await client.query('UPDATE "Reservations" SET "MarkSend" = 1 WHERE "Res_id" = $1', [resId]);
         await client.query(`
-          INSERT INTO "MarkSend_Response" ("Hotel_Code", "Booking_id", "Service", "PnrID", "Message", "Type")
-          VALUES ($1, $2, $3, $4, $5, 'B');
+          INSERT INTO public.marksend_response (hotel_code, booking_id, service, pnrid, message, type, insertdate)
+          VALUES ($1, $2, $3, $4, $5, 'B', NOW());
         `, [hotelCode, row.Booking_Id, String(resId), pnrId, 'MarkSend Acknowledged Successfully']);
       } else {
         const item = bookLogicSandbox.reservations.find(r => r.Res_id === resId);
@@ -1702,7 +1702,7 @@ async function executeFullAutoSyncCycle(customConfig?: any) {
   try {
     pgClient = new pg.Client(config);
     await pgClient.connect();
-    const hRes = await pgClient.query('SELECT * FROM "Mas_Hotel" WHERE COALESCE("Inactive", 0) = 0;');
+    const hRes = await pgClient.query('SELECT hotelcode as "HotelCode", username as "Username", password as "Password", COALESCE(inactive, 0) as "Inactive" FROM mas_hotel WHERE COALESCE(inactive, 0) = 0;');
     activeHotels = hRes.rows;
   } catch (dbErr: any) {
     activeHotels = bookLogicSandbox.hotels.filter(h => !h.Inactive);
@@ -1778,6 +1778,12 @@ async function executeFullAutoSyncCycle(customConfig?: any) {
               `, [newResId, r.NoofRooms, r.RoomType, r.Checkindate, r.Checkoutdate, r.Total, r.rate_name, r.Room_Name]);
             }
 
+            // Insert Reservation_PerDay_details linked with Res_id
+            await pgClient.query(`
+              INSERT INTO "Reservation_PerDay_details" ("Hotel_Code", "Booking_Id", "Date", "rm_no", "Price", "Res_id")
+              VALUES ($1, $2, $3, $4, $5, $6);
+            `, [hotelCode, b.Booking_Id, b.RoomDetails[0]?.Checkindate || new Date().toISOString().substring(0, 10), '1', String(b.RoomDetails[0]?.Total || '0'), newResId]);
+
             await pgClient.query('COMMIT');
             stats.bookingsInserted++;
             addLog('success', `[Phase 1] Ingested Booking [${b.Booking_Id}] -> PostgreSQL Res_id #${newResId} ($${b.RoomDetails[0].Total})`);
@@ -1839,7 +1845,7 @@ async function executeFullAutoSyncCycle(customConfig?: any) {
   try {
     let pendingAcks: any[] = [];
     if (pgClient) {
-      const pRes = await pgClient.query('SELECT r.*, h."Username", h."Password" FROM "Reservations" r JOIN "Mas_Hotel" h ON r."Hotel_Code" = h."HotelCode" WHERE COALESCE(r."MarkSend", 0) = 0 LIMIT 10;');
+      const pRes = await pgClient.query('SELECT r.*, h.username as "Username", h.password as "Password" FROM "Reservations" r JOIN mas_hotel h ON r."Hotel_Code" = h.hotelcode WHERE COALESCE(r."MarkSend", 0) = 0 LIMIT 10;');
       pendingAcks = pRes.rows;
     } else {
       pendingAcks = bookLogicSandbox.reservations.filter(r => !r.MarkSend).slice(0, 10);
@@ -1849,8 +1855,8 @@ async function executeFullAutoSyncCycle(customConfig?: any) {
       if (pgClient) {
         await pgClient.query('UPDATE "Reservations" SET "MarkSend" = 1 WHERE "Res_id" = $1', [row.Res_id]);
         await pgClient.query(`
-          INSERT INTO "MarkSend_Response" ("Hotel_Code", "Booking_id", "Service", "PnrID", "Message", "Type")
-          VALUES ($1, $2, $3, $4, $5, 'B');
+          INSERT INTO public.marksend_response (hotel_code, booking_id, service, pnrid, message, type, insertdate)
+          VALUES ($1, $2, $3, $4, $5, 'B', NOW());
         `, [row.Hotel_Code, row.Booking_Id, String(row.Res_id), row.PnrID || 'PNR1000', 'Auto-Sync Acknowledged Successfully']);
       } else {
         const itm = bookLogicSandbox.reservations.find(r => r.Res_id === row.Res_id);
@@ -2059,6 +2065,15 @@ app.get('/api/booklogic/converted-files', (req, res) => {
 
 // Static file serving for converted_php files
 app.use('/converted_php', express.static(path.join(__dirname, 'converted_php')));
+app.get('/api/booklogic/raw-cron', (req, res) => {
+  try {
+    const cronPhp = fs.readFileSync(path.join(__dirname, 'converted_php/cron_auto_sync.php'), 'utf8');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.send(cronPhp);
+  } catch (err: any) {
+    res.status(500).send(err.message);
+  }
+});
 app.get('/cron_auto_sync.php', (req, res) => {
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.sendFile(path.join(__dirname, 'converted_php/cron_auto_sync.php'));

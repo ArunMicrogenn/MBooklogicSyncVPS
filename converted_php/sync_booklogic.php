@@ -66,7 +66,7 @@ function logMsg($msg, $type = 'info') {
 logMsg("=== STEP 1: Starting MarkSend Acknowledgment Sync ===", "info");
 
 try {
-    $hotelStmt = $pdo->query("SELECT * FROM \"Mas_Hotel\" WHERE COALESCE(\"Inactive\", 0) = 0");
+    $hotelStmt = $pdo->query("SELECT hotelcode as \"HotelCode\", username as \"Username\", password as \"Password\", COALESCE(inactive, 0) as \"Inactive\" FROM mas_hotel WHERE COALESCE(inactive, 0) = 0");
     $activeHotels = $hotelStmt->fetchAll();
 
     foreach ($activeHotels as $hotel) {
@@ -113,7 +113,7 @@ try {
                     $msg = $data['Hotel']['Booking']['Message'] ?? 'Success';
                     $pdo->beginTransaction();
                     
-                    $insLog = $pdo->prepare("INSERT INTO \"MarkSend_Response\" (\"Hotel_Code\", \"Booking_id\", \"Service\", \"PnrID\", \"Message\", \"Type\") VALUES (:hc, :bid, :srv, :pnr, :msg, 'B')");
+                    $insLog = $pdo->prepare("INSERT INTO public.marksend_response (hotel_code, booking_id, service, pnrid, message, type, insertdate) VALUES (:hc, :bid, :srv, :pnr, :msg, 'B', NOW())");
                     $insLog->execute([
                         ':hc' => $HotelCode,
                         ':bid' => $Booking_Id,
@@ -131,7 +131,7 @@ try {
                     $errMsg = is_array($data['Errors']['Error']) ? json_encode($data['Errors']['Error']) : $data['Errors']['Error'];
                     $pdo->beginTransaction();
 
-                    $insLog = $pdo->prepare("INSERT INTO \"MarkSend_Response\" (\"Hotel_Code\", \"Booking_id\", \"Service\", \"PnrID\", \"Message\", \"Type\") VALUES (:hc, :bid, :srv, :pnr, :msg, 'C')");
+                    $insLog = $pdo->prepare("INSERT INTO public.marksend_response (hotel_code, booking_id, service, pnrid, message, type, insertdate) VALUES (:hc, :bid, :srv, :pnr, :msg, 'C', NOW())");
                     $insLog->execute([
                         ':hc' => $HotelCode,
                         ':bid' => $Booking_Id,
@@ -160,7 +160,7 @@ try {
 logMsg("=== STEP 2: Starting BookLogic Reservation Ingestion ===", "info");
 
 try {
-    $hotelStmt = $pdo->query("SELECT * FROM \"Mas_Hotel\" WHERE COALESCE(\"Inactive\", 0) = 0");
+    $hotelStmt = $pdo->query("SELECT hotelcode as \"HotelCode\", username as \"Username\", password as \"Password\", COALESCE(inactive, 0) as \"Inactive\" FROM mas_hotel WHERE COALESCE(inactive, 0) = 0");
     $activeHotels = $hotelStmt->fetchAll();
 
     foreach ($activeHotels as $hotel) {

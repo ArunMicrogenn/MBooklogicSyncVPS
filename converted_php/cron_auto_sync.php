@@ -18,7 +18,7 @@ $api_url = getenv('BOOKLOGIC_API_URL') ?: (defined('BOOKLOGIC_API_URL') ? BOOKLO
 
 // Parse CLI options
 $options = getopt("", ["daemon", "interval::", "hotel::"]);
-$is_daemon = isset($options['daemon']);
+$is_daemon = isset($options['daemon']) || in_array('--daemon', $argv ?? []);
 $interval = isset($options['interval']) ? max(10, (int)$options['interval']) : 60;
 $target_hotel = $options['hotel'] ?? null;
 
@@ -38,15 +38,15 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
     ];
 
     try {
-        // Query Active Hotels
-        $hotelQuery = "SELECT * FROM \"Mas_Hotel\" WHERE COALESCE(\"Inactive\", 0) = 0";
+        // Query Active Hotels from mas_hotel
+        $hotelQuery = "SELECT hotelcode, username, password, COALESCE(inactive, 0) as inactive FROM mas_hotel WHERE COALESCE(inactive, 0) = 0";
         if ($target_hotel) {
-            $hotelQuery .= " AND \"HotelCode\" = " . $pdo->quote($target_hotel);
+            $hotelQuery .= " AND hotelcode = " . $pdo->quote($target_hotel);
         }
         $hotels = $pdo->query($hotelQuery)->fetchAll(PDO::FETCH_ASSOC);
 
         if (empty($hotels)) {
-            logCli("No active hotels found in Mas_Hotel table.", "WARN");
+            logCli("No active hotels found in mas_hotel table.", "WARN");
             return $stats;
         }
 
@@ -55,9 +55,9 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
         // =========================================================================
         logCli("--- [PHASE 1] Fetching Bookings from BookLogic API ---");
         foreach ($hotels as $hotel) {
-            $hotelCode = $hotel['HotelCode'];
-            $username  = $hotel['Username'];
-            $password  = $hotel['Password'];
+            $hotelCode = $hotel['hotelcode'] ?? $hotel['HotelCode'];
+            $username  = $hotel['username'] ?? $hotel['Username'];
+            $password  = $hotel['password'] ?? $hotel['Password'];
 
             logCli("Querying BookLogic API for Hotel: {$hotelCode}...");
 
@@ -166,24 +166,32 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
                             ]);
                             $newResId = $insRes->fetchColumn();
 
-                            // Insert Customer
+                            // 2. Insert Customer linked with Res_id
                             if (isset($b->CL) || isset($b->Customer)) {
                                 $cust = $b->CL ?? $b->Customer;
                                 $insCust = $pdo->prepare("
-                                    INSERT INTO \"Reservation_Customer\" (\"Res_id\", \"FirstName\", \"LastName\", \"Email\", \"Tel\", \"Country\")
-                                    VALUES (:rid, :fn, :ln, :em, :tel, :cnt)
+                                    INSERT INTO \"Reservation_Customer\" (
+                                        \"Res_id\", \"FirstName\", \"LastName\", \"Email\", \"Tel\",
+                                        \"address\", \"zip\", \"Location\", \"Country\"
+                                    ) VALUES (
+                                        :rid, :fn, :ln, :em, :tel,
+                                        :addr, :zip, :loc, :cnt
+                                    )
                                 ");
                                 $insCust->execute([
-                                    ':rid' => $newResId,
-                                    ':fn' => (string)($cust->FirstName ?? 'Valued'),
-                                    ':ln' => (string)($cust->LastName ?? 'Guest'),
-                                    ':em' => (string)($cust->Email ?? 'guest@example.com'),
-                                    ':tel' => (string)($cust->Tel ?? ''),
-                                    ':cnt' => (string)($cust->Country ?? 'US')
+                                    ':rid'  => $newResId,
+                                    ':fn'   => (string)($cust->FirstName ?? 'Valued'),
+                                    ':ln'   => (string)($cust->LastName ?? 'Guest'),
+                                    ':em'   => (string)($cust->Email ?? ''),
+                                    ':tel'  => (string)($cust->Tel ?? ''),
+                                    ':addr' => (string)($cust->address ?? ''),
+                                    ':zip'  => (string)($cust->zip ?? ''),
+                                    ':loc'  => (string)($cust->Location ?? ''),
+                                    ':cnt'  => (string)($cust->Country ?? '')
                                 ]);
                             }
 
-                            // Insert Room Details
+                            // 3. Insert Room Details linked with Res_id
                             $roomsList = [];
                             if (isset($b->RoomDetails)) {
                                 $roomsList = is_array($b->RoomDetails) ? $b->RoomDetails : [$b->RoomDetails];
@@ -192,22 +200,78 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
                             }
 
                             foreach ($roomsList as $room) {
+                                $rAttrs = is_object($room) ? $room->attributes() : [];
+                                $rateAttrs = isset($room->rate) && is_object($room->rate) ? $room->rate->attributes() : [];
+                                $allotAttrs = isset($room->allot) && is_object($room->allot) ? $room->allot->attributes() : [];
+                                $rmNameAttrs = isset($room->rmName) && is_object($room->rmName) ? $room->rmName->attributes() : [];
+
                                 $insDet = $pdo->prepare("
                                     INSERT INTO \"Reservations_details\" (
-                                        \"Res_id\", \"NoofRooms\", \"RoomType\", \"Checkindate\", \"Checkoutdate\", \"Total\", \"rate_name\"
+                                        \"Res_id\", \"NoofRooms\", \"RoomType\", \"Checkindate\", \"Checkoutdate\",
+                                        \"Netprice\", \"RoomTotal\", \"ExtrasTotal\", \"MealTotal\", \"Total\",
+                                        \"TaxIncluded\", \"TaxExcluded\", \"rate_name\", \"rate_id\", \"Availability_id\",
+                                        \"Availability_name\", \"Room_Id\", \"Room_Name\"
                                     ) VALUES (
-                                        :rid, :nr, :rt, :cin, :cout, :tot, :rn
+                                        :rid, :nr, :rt, :cin, :cout,
+                                        :np, :rtot, :extot, :mtot, :tot,
+                                        :tinc, :texc, :rname, :ridx, :avid,
+                                        :avname, :rmid, :rmname
                                     )
                                 ");
                                 $insDet->execute([
-                                    ':rid' => $newResId,
-                                    ':nr' => (int)($room->Rooms ?? $room->NoofRooms ?? 1),
-                                    ':rt' => (string)($room->Room ?? $room->RoomType ?? 'Standard Room'),
-                                    ':cin' => (string)($room->Checkin ?? $room->Checkindate ?? date('Y-m-d')),
-                                    ':cout' => (string)($room->Checkout ?? $room->Checkoutdate ?? date('Y-m-d', strtotime('+1 day'))),
-                                    ':tot' => (float)($room->Total ?? $room->RoomTotal ?? 100.00),
-                                    ':rn' => (string)($room->rate ?? $room->rate_name ?? 'Standard Rate')
+                                    ':rid'    => $newResId,
+                                    ':nr'     => (string)($room->Rooms ?? $room->NoofRooms ?? '1'),
+                                    ':rt'     => (string)($room->Room ?? $room->RoomType ?? ''),
+                                    ':cin'    => (string)($room->Checkin ?? $room->Checkindate ?? date('Y-m-d')),
+                                    ':cout'   => (string)($room->Checkout ?? $room->Checkoutdate ?? date('Y-m-d', strtotime('+1 day'))),
+                                    ':np'     => (string)($room->Netprice ?? '0'),
+                                    ':rtot'   => (string)($room->roomTotal ?? $room->RoomTotal ?? '0'),
+                                    ':extot'  => (string)($room->ExtrasTotal ?? '0'),
+                                    ':mtot'   => (string)($room->MealTotal ?? '0'),
+                                    ':tot'    => (string)($room->Total ?? $room->RoomTotal ?? '0'),
+                                    ':tinc'   => (string)($room->TaxIncluded ?? '0'),
+                                    ':texc'   => (string)($room->TaxExcluded ?? '0'),
+                                    ':rname'  => (string)($room->rate ?? $room->rate_name ?? ''),
+                                    ':ridx'   => (string)($rateAttrs['id'] ?? $room->rate_id ?? ''),
+                                    ':avid'   => (string)($allotAttrs['id'] ?? $room->Availability_id ?? ''),
+                                    ':avname' => (string)($room->allot ?? $room->Availability_name ?? ''),
+                                    ':rmid'   => (string)($rmNameAttrs['id'] ?? $room->Room_Id ?? ''),
+                                    ':rmname' => (string)($room->rmName ?? $room->Room_Name ?? '')
                                 ]);
+                            }
+
+                            // 4. Insert Reservation_PerDay_details linked with Res_id
+                            if (isset($b->PerDay)) {
+                                $perDayList = [];
+                                if (is_array($b->PerDay)) {
+                                    $perDayList = $b->PerDay;
+                                } elseif ($b->PerDay instanceof SimpleXMLElement) {
+                                    foreach ($b->PerDay as $pd) {
+                                        $perDayList[] = $pd;
+                                    }
+                                }
+
+                                if (!empty($perDayList)) {
+                                    $insPerDay = $pdo->prepare("
+                                        INSERT INTO \"Reservation_PerDay_details\" (\"Hotel_Code\", \"Booking_Id\", \"Date\", \"rm_no\", \"Price\", \"Res_id\")
+                                        VALUES (:hc, :bid, :dt, :rmno, :price, :rid)
+                                    ");
+                                    foreach ($perDayList as $pItem) {
+                                        $pdAttrs = is_object($pItem) ? $pItem->attributes() : [];
+                                        $pDate   = (string)($pdAttrs['date'] ?? ($pItem['date'] ?? ''));
+                                        $pRmNo   = (string)($pdAttrs['rm_no'] ?? ($pItem['rm_no'] ?? '1'));
+                                        $pPrice  = (string)($pItem->Price ?? ($pItem['Price'] ?? '0'));
+
+                                        $insPerDay->execute([
+                                            ':hc'    => $hotelCode,
+                                            ':bid'   => $bookingId,
+                                            ':dt'    => $pDate,
+                                            ':rmno'  => $pRmNo,
+                                            ':price' => $pPrice,
+                                            ':rid'   => $newResId
+                                        ]);
+                                    }
+                                }
                             }
 
                             $pdo->commit();
@@ -223,32 +287,46 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
 
                     // Acknowledge immediately to BookLogic so it advances the queue
                     if ($pnrId && $newResId) {
-                        $markCurl = curl_init();
-                        curl_setopt_array($markCurl, [
+                        $Res_id = $newResId;
+                        $PnrID  = $pnrId;
+                        $curl = curl_init();
+                        curl_setopt_array($curl, array(
                             CURLOPT_URL => $api_url,
                             CURLOPT_RETURNTRANSFER => true,
-                            CURLOPT_TIMEOUT => 25,
-                            CURLOPT_POST => true,
-                            CURLOPT_POSTFIELDS => "<markSendRQ>\r\n<RequestorID>\r\n<UserName>{$username}</UserName>\r\n<Password>{$password}</Password>\r\n</RequestorID>\r\n<hotelCode>{$hotelCode}</hotelCode>\r\n<PnrID>{$pnrId}</PnrID>\r\n<SrvNum>{$newResId}</SrvNum>\r\n</markSendRQ>",
-                            CURLOPT_HTTPHEADER => ["content-type: text/xml; charset=utf-8"],
-                            CURLOPT_SSL_VERIFYPEER => false,
-                            CURLOPT_SSL_VERIFYHOST => false,
-                        ]);
-                        curl_exec($markCurl);
-                        curl_close($markCurl);
+                            CURLOPT_ENCODING => "",
+                            CURLOPT_MAXREDIRS => 10,
+                            CURLOPT_TIMEOUT => 30,
+                            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+                            CURLOPT_CUSTOMREQUEST => "POST",
+                            CURLOPT_POSTFIELDS => "<markSendRQ>\r\n<RequestorID>\r\n<UserName>$username</UserName>\r\n<Password>$password</Password>\r\n</RequestorID>\r\n<hotelCode>$hotelCode</hotelCode>\r\n<PnrID>$PnrID</PnrID>\r\n<SrvNum>$Res_id</SrvNum>\r\n</markSendRQ>",
+                            CURLOPT_HTTPHEADER => array(
+                                "cache-control: no-cache",
+                                "postman-token: 49febbc8-8756-79b6-1074-cbcc1d6369f3"
+                            ),
+                        ));
+                        $markResp = curl_exec($curl);
+                        $err = curl_error($curl);
+                        curl_close($curl);
 
-                        $pdo->prepare("UPDATE \"Reservations\" SET \"MarkSend\" = 1 WHERE \"Res_id\" = :rid")->execute([':rid' => $newResId]);
+                        $msg = $err ? ("cURL Error: " . $err) : substr(strip_tags((string)$markResp), 0, 950);
+                        if (empty($msg)) $msg = 'MarkSend Transmitted';
+
+                        // Insert into public.marksend_response
                         $pdo->prepare("
-                            INSERT INTO \"MarkSend_Response\" (\"Hotel_Code\", \"Booking_id\", \"Service\", \"PnrID\", \"Message\", \"Type\")
-                            VALUES (:hc, :bid, :srv, :pnr, 'Auto-Sync Acknowledged', 'B')
+                            INSERT INTO public.marksend_response (hotel_code, booking_id, service, pnrid, message, type, insertdate)
+                            VALUES (:hc, :bid, :srv, :pnr, :msg, :type, NOW())
                         ")->execute([
-                            ':hc' => $hotelCode,
-                            ':bid' => $bookingId,
-                            ':srv' => (string)$newResId,
-                            ':pnr' => $pnrId
+                            ':hc'   => $hotelCode,
+                            ':bid'  => $bookingId,
+                            ':srv'  => (string)$Res_id,
+                            ':pnr'  => $PnrID,
+                            ':msg'  => $msg,
+                            ':type' => $err ? 'E' : 'B'
                         ]);
+
+                        $pdo->prepare("UPDATE \"Reservations\" SET \"MarkSend\" = 1 WHERE \"Res_id\" = :rid")->execute([':rid' => $Res_id]);
                         $stats['marksend_acked']++;
-                        logCli("MarkSend acknowledged for PnrID: {$pnrId} / Booking ID: {$bookingId}", "SUCCESS");
+                        logCli("MarkSend acknowledged & inserted to marksend_response for PnrID: {$PnrID} (Res_id: {$Res_id})", "SUCCESS");
                     }
                 }
             }
@@ -259,9 +337,9 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
         // =========================================================================
         logCli("--- [PHASE 2] Processing MarkSend Acknowledgments ---");
         $pendingResStmt = $pdo->query("
-            SELECT r.\"Res_id\", r.\"Booking_Id\", r.\"Hotel_Code\", r.\"PnrID\", h.\"Username\", h.\"Password\"
+            SELECT r.\"Res_id\", r.\"Booking_Id\", r.\"Hotel_Code\", r.\"PnrID\", h.username, h.password
             FROM \"Reservations\" r
-            JOIN \"Mas_Hotel\" h ON r.\"Hotel_Code\" = h.\"HotelCode\"
+            JOIN mas_hotel h ON r.\"Hotel_Code\" = h.hotelcode
             WHERE COALESCE(r.\"MarkSend\", 0) = 0
             LIMIT 25
         ");
@@ -270,39 +348,50 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
         logCli("Found " . count($pendingAcks) . " pending MarkSend acknowledgment(s)");
 
         foreach ($pendingAcks as $p) {
+            $Res_id    = $p['Res_id'];
+            $PnrID     = $p['PnrID'];
+            $UserName  = $p['username'];
+            $Password  = $p['password'];
+            $HotelCode = $p['Hotel_Code'];
+
             $curl = curl_init();
-            curl_setopt_array($curl, [
+            curl_setopt_array($curl, array(
                 CURLOPT_URL => $api_url,
                 CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_ENCODING => "",
+                CURLOPT_MAXREDIRS => 10,
                 CURLOPT_TIMEOUT => 30,
                 CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
                 CURLOPT_CUSTOMREQUEST => "POST",
-                CURLOPT_POSTFIELDS => "<markSendRQ>\r\n<RequestorID>\r\n<UserName>{$p['Username']}</UserName>\r\n<Password>{$p['Password']}</Password>\r\n</RequestorID>\r\n<hotelCode>{$p['Hotel_Code']}</hotelCode>\r\n<PnrID>{$p['PnrID']}</PnrID>\r\n<SrvNum>{$p['Res_id']}</SrvNum>\r\n</markSendRQ>",
-                CURLOPT_HTTPHEADER => ["content-type: text/xml"],
-            ]);
+                CURLOPT_POSTFIELDS => "<markSendRQ>\r\n<RequestorID>\r\n<UserName>$UserName</UserName>\r\n<Password>$Password</Password>\r\n</RequestorID>\r\n<hotelCode>$HotelCode</hotelCode>\r\n<PnrID>$PnrID</PnrID>\r\n<SrvNum>$Res_id</SrvNum>\r\n</markSendRQ>",
+                CURLOPT_HTTPHEADER => array(
+                    "cache-control: no-cache",
+                    "postman-token: 49febbc8-8756-79b6-1074-cbcc1d6369f3"
+                ),
+            ));
             $response = curl_exec($curl);
             $err = curl_error($curl);
             curl_close($curl);
 
-            if ($err) {
-                logCli("MarkSend cURL error for Booking {$p['Booking_Id']}: $err", "ERROR");
-                continue;
-            }
+            $msg = $err ? ("cURL Error: " . $err) : substr(strip_tags((string)$response), 0, 950);
+            if (empty($msg)) $msg = 'MarkSend Transmitted';
 
             $pdo->beginTransaction();
-            $pdo->prepare("UPDATE \"Reservations\" SET \"MarkSend\" = 1 WHERE \"Res_id\" = :rid")->execute([':rid' => $p['Res_id']]);
+            $pdo->prepare("UPDATE \"Reservations\" SET \"MarkSend\" = 1 WHERE \"Res_id\" = :rid")->execute([':rid' => $Res_id]);
             $pdo->prepare("
-                INSERT INTO \"MarkSend_Response\" (\"Hotel_Code\", \"Booking_id\", \"Service\", \"PnrID\", \"Message\", \"Type\")
-                VALUES (:hc, :bid, :srv, :pnr, 'Auto-Sync Acknowledged', 'B')
+                INSERT INTO public.marksend_response (hotel_code, booking_id, service, pnrid, message, type, insertdate)
+                VALUES (:hc, :bid, :srv, :pnr, :msg, :type, NOW())
             ")->execute([
-                ':hc' => $p['Hotel_Code'],
-                ':bid' => $p['Booking_Id'],
-                ':srv' => (string)$p['Res_id'],
-                ':pnr' => $p['PnrID']
+                ':hc'   => $HotelCode,
+                ':bid'  => $p['Booking_Id'],
+                ':srv'  => (string)$Res_id,
+                ':pnr'  => $PnrID,
+                ':msg'  => $msg,
+                ':type' => $err ? 'E' : 'B'
             ]);
             $pdo->commit();
             $stats['marksend_acked']++;
-            logCli("MarkSend acknowledged for Booking ID: {$p['Booking_Id']}", "SUCCESS");
+            logCli("MarkSend recorded in marksend_response for Booking ID: {$p['Booking_Id']} (Res_id: {$Res_id})", "SUCCESS");
         }
 
         // =========================================================================
@@ -310,9 +399,9 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
         // =========================================================================
         logCli("--- [PHASE 3] Pushing Pending Room Availability ---");
         $availStmt = $pdo->query("
-            SELECT a.*, h.\"Username\", h.\"Password\"
+            SELECT a.*, h.username, h.password
             FROM trans_roomavailability_chart_datewise a
-            JOIN \"Mas_Hotel\" h ON a.hotelcode = h.\"HotelCode\"
+            JOIN mas_hotel h ON a.hotelcode = h.hotelcode
             WHERE COALESCE(a.uploadflg, 0) = 0
             LIMIT 50
         ");
@@ -328,7 +417,7 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
                 CURLOPT_TIMEOUT => 30,
                 CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
                 CURLOPT_CUSTOMREQUEST => "POST",
-                CURLOPT_POSTFIELDS => "<availabilityUpdateRQ>\r\n<RequestorID>\r\n<UserName>{$a['Username']}</UserName>\r\n<Password>{$a['Password']}</Password>\r\n</RequestorID>\r\n<availInfo>\r\n<hotelCode>{$a['hotelcode']}</hotelCode>\r\n<allotmentCode>{$a['allotcode']}</allotmentCode>\r\n<fromd>{$a['fromdate']}</fromd>\r\n<tod>{$a['todate']}</tod>\r\n<allotment>{$a['Availablerooms']}</allotment>\r\n<stopSales>{$a['stopsales']}</stopSales>\r\n</availInfo>\r\n</availabilityUpdateRQ>",
+                CURLOPT_POSTFIELDS => "<availabilityUpdateRQ>\r\n<RequestorID>\r\n<UserName>{$a['username']}</UserName>\r\n<Password>{$a['password']}</Password>\r\n</RequestorID>\r\n<availInfo>\r\n<hotelCode>{$a['hotelcode']}</hotelCode>\r\n<allotmentCode>{$a['allotcode']}</allotmentCode>\r\n<fromd>{$a['fromdate']}</fromd>\r\n<tod>{$a['todate']}</tod>\r\n<allotment>{$a['Availablerooms']}</allotment>\r\n<stopSales>{$a['stopsales']}</stopSales>\r\n</availInfo>\r\n</availabilityUpdateRQ>",
                 CURLOPT_HTTPHEADER => ["content-type: text/xml"],
             ]);
             $response = curl_exec($curl);
@@ -351,9 +440,9 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
         // =========================================================================
         logCli("--- [PHASE 4] Pushing Pending Room Rates ---");
         $ratesStmt = $pdo->query("
-            SELECT r.*, h.\"Username\", h.\"Password\"
+            SELECT r.*, h.username, h.password
             FROM \"Trans_roomrateupdates_datewise\" r
-            JOIN \"Mas_Hotel\" h ON r.\"HotelCode\" = h.\"HotelCode\"
+            JOIN mas_hotel h ON r.\"HotelCode\" = h.hotelcode
             WHERE COALESCE(r.\"uploadflg\", 0) = 0
             LIMIT 50
         ");
