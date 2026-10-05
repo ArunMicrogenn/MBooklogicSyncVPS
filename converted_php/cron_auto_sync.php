@@ -119,14 +119,24 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
 
                     $pnrId      = (string)($b->PnrID ?? '');
                     $extRef     = (string)($b->ExternalReference ?? '');
+                    $extResRoomId = (string)($b->ExternalReservationRoomId ?? '');
+                    $extResId   = (string)($b->ExternalReservationId ?? '');
                     $deposit    = (float)($b->deposit ?? 0);
                     $service    = (string)($b->Service ?? '');
                     $agentName  = (string)($b->TravelagentName ?? $b->TravelagentCode ?? 'BookLogic OTA');
                     $updateDate = (string)($b->UpdateDate ?? date('Y-m-d H:i:s'));
+                    $modifyDate = (string)($b->modifyDate ?? $b->ModifyDate ?? $b->modify_date ?? $b->UpdateDate ?? date('Y-m-d H:i:s'));
+                    if (empty(trim($modifyDate))) {
+                        $modifyDate = $updateDate ?: date('Y-m-d H:i:s');
+                    }
+                    $cancelDate = (string)($b->cancelDate ?? $b->CancelDate ?? '');
                     $currency   = (string)($b->Currency ?? 'USD');
                     $status     = (string)($b->Status ?? 'Confirmed');
                     $adult      = (int)($b->Adult ?? 2);
-                    $remarks    = (string)($b->Remarks ?? 'BookLogic Staging Sync');
+                    $childB     = (string)($b->ChildB ?? '0');
+                    $childA     = (string)($b->ChildA ?? '0');
+                    $infant     = (string)($b->Infant ?? '0');
+                    $remarks    = (string)($b->Remarks ?? 'BookLogic Live Ingest');
 
                     // Check duplicate
                     $chk = $pdo->prepare("SELECT \"Res_id\" FROM \"Reservations\" WHERE \"Booking_Id\" = :bid AND \"syncType\" = :st LIMIT 1");
@@ -141,28 +151,37 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
                             $insRes = $pdo->prepare("
                                 INSERT INTO \"Reservations\" (
                                     \"Hotel_Code\", \"Booking_Id\", \"syncType\", \"PnrID\", \"ExternalReference\",
-                                    \"deposit\", \"Service\", \"TravelagentName\", \"UpdateDate\", \"Currency\",
-                                    \"Status\", \"Adult\", \"Remarks\", \"Insertdate\", \"MarkSend\"
+                                    \"ExternalReservationRoomId\", \"ExternalReservationId\", \"deposit\", \"Service\",
+                                    \"TravelagentName\", \"UpdateDate\", \"modifyDate\", \"cancelDate\", \"Currency\",
+                                    \"Status\", \"Adult\", \"ChildB\", \"ChildA\", \"Infant\", \"Remarks\", \"Insertdate\", \"MarkSend\"
                                 ) VALUES (
                                     :hc, :bid, :st, :pnr, :ext,
-                                    :dep, :srv, :ta, :ud, :curr,
-                                    :stat, :adult, :rem, NOW(), 0
+                                    :exrrid, :exrid, :dep, :srv,
+                                    :ta, :ud, :md, :cd, :curr,
+                                    :stat, :adult, :cb, :ca, :inf, :rem, NOW(), 0
                                 ) RETURNING \"Res_id\"
                             ");
                             $insRes->execute([
-                                ':hc' => $hotelCode,
-                                ':bid' => $bookingId,
-                                ':st' => $syncType,
-                                ':pnr' => $pnrId,
-                                ':ext' => $extRef,
-                                ':dep' => $deposit,
-                                ':srv' => $service,
-                                ':ta' => $agentName,
-                                ':ud' => $updateDate,
-                                ':curr' => $currency,
-                                ':stat' => $status,
-                                ':adult' => $adult,
-                                ':rem' => $remarks
+                                ':hc'     => $hotelCode,
+                                ':bid'    => $bookingId,
+                                ':st'     => $syncType,
+                                ':pnr'    => $pnrId,
+                                ':ext'    => $extRef,
+                                ':exrrid' => $extResRoomId,
+                                ':exrid'  => $extResId,
+                                ':dep'    => $deposit,
+                                ':srv'    => $service,
+                                ':ta'     => $agentName,
+                                ':ud'     => $updateDate,
+                                ':md'     => $modifyDate,
+                                ':cd'     => $cancelDate,
+                                ':curr'   => $currency,
+                                ':stat'   => $status,
+                                ':adult'  => $adult,
+                                ':cb'     => $childB,
+                                ':ca'     => $childA,
+                                ':inf'    => $infant,
+                                ':rem'    => $remarks
                             ]);
                             $newResId = $insRes->fetchColumn();
 
@@ -191,7 +210,7 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
                                 ]);
                             }
 
-                            // 3. Insert Room Details linked with Res_id
+                            // 3. Insert into reservations_details_booklogic and Reservations_details linked with Res_id
                             $roomsList = [];
                             if (isset($b->RoomDetails)) {
                                 $roomsList = is_array($b->RoomDetails) ? $b->RoomDetails : [$b->RoomDetails];
@@ -205,42 +224,85 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
                                 $allotAttrs = isset($room->allot) && is_object($room->allot) ? $room->allot->attributes() : [];
                                 $rmNameAttrs = isset($room->rmName) && is_object($room->rmName) ? $room->rmName->attributes() : [];
 
-                                $insDet = $pdo->prepare("
-                                    INSERT INTO \"Reservations_details\" (
-                                        \"Res_id\", \"NoofRooms\", \"RoomType\", \"Checkindate\", \"Checkoutdate\",
-                                        \"Netprice\", \"RoomTotal\", \"ExtrasTotal\", \"MealTotal\", \"Total\",
-                                        \"TaxIncluded\", \"TaxExcluded\", \"rate_name\", \"rate_id\", \"Availability_id\",
-                                        \"Availability_name\", \"Room_Id\", \"Room_Name\"
-                                    ) VALUES (
-                                        :rid, :nr, :rt, :cin, :cout,
-                                        :np, :rtot, :extot, :mtot, :tot,
-                                        :tinc, :texc, :rname, :ridx, :avid,
-                                        :avname, :rmid, :rmname
-                                    )
-                                ");
-                                $insDet->execute([
-                                    ':rid'    => $newResId,
-                                    ':nr'     => (string)($room->Rooms ?? $room->NoofRooms ?? '1'),
-                                    ':rt'     => (string)($room->Room ?? $room->RoomType ?? ''),
-                                    ':cin'    => (string)($room->Checkin ?? $room->Checkindate ?? date('Y-m-d')),
-                                    ':cout'   => (string)($room->Checkout ?? $room->Checkoutdate ?? date('Y-m-d', strtotime('+1 day'))),
-                                    ':np'     => (string)($room->Netprice ?? '0'),
-                                    ':rtot'   => (string)($room->roomTotal ?? $room->RoomTotal ?? '0'),
-                                    ':extot'  => (string)($room->ExtrasTotal ?? '0'),
-                                    ':mtot'   => (string)($room->MealTotal ?? '0'),
-                                    ':tot'    => (string)($room->Total ?? $room->RoomTotal ?? '0'),
-                                    ':tinc'   => (string)($room->TaxIncluded ?? '0'),
-                                    ':texc'   => (string)($room->TaxExcluded ?? '0'),
-                                    ':rname'  => (string)($room->rate ?? $room->rate_name ?? ''),
-                                    ':ridx'   => (string)($rateAttrs['id'] ?? $room->rate_id ?? ''),
-                                    ':avid'   => (string)($allotAttrs['id'] ?? $room->Availability_id ?? ''),
-                                    ':avname' => (string)($room->allot ?? $room->Availability_name ?? ''),
-                                    ':rmid'   => (string)($rmNameAttrs['id'] ?? $room->Room_Id ?? ''),
-                                    ':rmname' => (string)($room->rmName ?? $room->Room_Name ?? '')
-                                ]);
+                                // Insert into reservations_details_booklogic
+                                try {
+                                    $insDetBL = $pdo->prepare("
+                                        INSERT INTO reservations_details_booklogic (
+                                            res_id, noofrooms, roomtype, checkindate, checkoutdate,
+                                            netprice, roomtotal, extrastotal, mealtotal, total,
+                                            taxincluded, taxexcluded, rate_name, rate_id, availability_id,
+                                            availability_name, room_id, room_name, insertdate
+                                        ) VALUES (
+                                            :rid, :nr, :rt, :cin, :cout,
+                                            :np, :rtot, :extot, :mtot, :tot,
+                                            :tinc, :texc, :rname, :ridx, :avid,
+                                            :avname, :rmid, :rmname, NOW()
+                                        )
+                                    ");
+                                    $insDetBL->execute([
+                                        ':rid'    => $newResId,
+                                        ':nr'     => (string)($room->Rooms ?? $room->NoofRooms ?? '1'),
+                                        ':rt'     => (string)($room->Room ?? $room->RoomType ?? ''),
+                                        ':cin'    => (string)($room->Checkin ?? $room->Checkindate ?? date('Y-m-d')),
+                                        ':cout'   => (string)($room->Checkout ?? $room->Checkoutdate ?? date('Y-m-d', strtotime('+1 day'))),
+                                        ':np'     => (string)($room->Netprice ?? '0'),
+                                        ':rtot'   => (string)($room->roomTotal ?? $room->RoomTotal ?? '0'),
+                                        ':extot'  => (string)($room->ExtrasTotal ?? '0'),
+                                        ':mtot'   => (string)($room->MealTotal ?? '0'),
+                                        ':tot'    => (string)($room->Total ?? $room->RoomTotal ?? '0'),
+                                        ':tinc'   => (string)($room->TaxIncluded ?? '0'),
+                                        ':texc'   => (string)($room->TaxExcluded ?? '0'),
+                                        ':rname'  => (string)($room->rate ?? $room->rate_name ?? ''),
+                                        ':ridx'   => (string)($rateAttrs['id'] ?? $room->rate_id ?? ''),
+                                        ':avid'   => (string)($allotAttrs['id'] ?? $room->Availability_id ?? ''),
+                                        ':avname' => (string)($room->allot ?? $room->Availability_name ?? ''),
+                                        ':rmid'   => (string)($rmNameAttrs['id'] ?? $room->Room_Id ?? ''),
+                                        ':rmname' => (string)($room->rmName ?? $room->Room_Name ?? '')
+                                    ]);
+                                } catch (Exception $eBL) {
+                                    // Fallback / legacy table
+                                }
+
+                                try {
+                                    $insDet = $pdo->prepare("
+                                        INSERT INTO \"Reservations_details\" (
+                                            \"Res_id\", \"NoofRooms\", \"RoomType\", \"Checkindate\", \"Checkoutdate\",
+                                            \"Netprice\", \"RoomTotal\", \"ExtrasTotal\", \"MealTotal\", \"Total\",
+                                            \"TaxIncluded\", \"TaxExcluded\", \"rate_name\", \"rate_id\", \"Availability_id\",
+                                            \"Availability_name\", \"Room_Id\", \"Room_Name\"
+                                        ) VALUES (
+                                            :rid, :nr, :rt, :cin, :cout,
+                                            :np, :rtot, :extot, :mtot, :tot,
+                                            :tinc, :texc, :rname, :ridx, :avid,
+                                            :avname, :rmid, :rmname
+                                        )
+                                    ");
+                                    $insDet->execute([
+                                        ':rid'    => $newResId,
+                                        ':nr'     => (string)($room->Rooms ?? $room->NoofRooms ?? '1'),
+                                        ':rt'     => (string)($room->Room ?? $room->RoomType ?? ''),
+                                        ':cin'    => (string)($room->Checkin ?? $room->Checkindate ?? date('Y-m-d')),
+                                        ':cout'   => (string)($room->Checkout ?? $room->Checkoutdate ?? date('Y-m-d', strtotime('+1 day'))),
+                                        ':np'     => (string)($room->Netprice ?? '0'),
+                                        ':rtot'   => (string)($room->roomTotal ?? $room->RoomTotal ?? '0'),
+                                        ':extot'  => (string)($room->ExtrasTotal ?? '0'),
+                                        ':mtot'   => (string)($room->MealTotal ?? '0'),
+                                        ':tot'    => (string)($room->Total ?? $room->RoomTotal ?? '0'),
+                                        ':tinc'   => (string)($room->TaxIncluded ?? '0'),
+                                        ':texc'   => (string)($room->TaxExcluded ?? '0'),
+                                        ':rname'  => (string)($room->rate ?? $room->rate_name ?? ''),
+                                        ':ridx'   => (string)($rateAttrs['id'] ?? $room->rate_id ?? ''),
+                                        ':avid'   => (string)($allotAttrs['id'] ?? $room->Availability_id ?? ''),
+                                        ':avname' => (string)($room->allot ?? $room->Availability_name ?? ''),
+                                        ':rmid'   => (string)($rmNameAttrs['id'] ?? $room->Room_Id ?? ''),
+                                        ':rmname' => (string)($room->rmName ?? $room->Room_Name ?? '')
+                                    ]);
+                                } catch (Exception $eDet) {
+                                    // Ignored if table name differs
+                                }
                             }
 
-                            // 4. Insert Reservation_PerDay_details linked with Res_id
+                            // 4. Insert reservation_perday_details_booklogic and Reservation_PerDay_details linked with Res_id
                             if (isset($b->PerDay)) {
                                 $perDayList = [];
                                 if (is_array($b->PerDay)) {
@@ -252,24 +314,46 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null) {
                                 }
 
                                 if (!empty($perDayList)) {
-                                    $insPerDay = $pdo->prepare("
-                                        INSERT INTO \"Reservation_PerDay_details\" (\"Hotel_Code\", \"Booking_Id\", \"Date\", \"rm_no\", \"Price\", \"Res_id\")
-                                        VALUES (:hc, :bid, :dt, :rmno, :price, :rid)
-                                    ");
                                     foreach ($perDayList as $pItem) {
                                         $pdAttrs = is_object($pItem) ? $pItem->attributes() : [];
                                         $pDate   = (string)($pdAttrs['date'] ?? ($pItem['date'] ?? ''));
                                         $pRmNo   = (string)($pdAttrs['rm_no'] ?? ($pItem['rm_no'] ?? '1'));
                                         $pPrice  = (string)($pItem->Price ?? ($pItem['Price'] ?? '0'));
 
-                                        $insPerDay->execute([
-                                            ':hc'    => $hotelCode,
-                                            ':bid'   => $bookingId,
-                                            ':dt'    => $pDate,
-                                            ':rmno'  => $pRmNo,
-                                            ':price' => $pPrice,
-                                            ':rid'   => $newResId
-                                        ]);
+                                        // Insert into reservation_perday_details_booklogic
+                                        try {
+                                            $insPerDayBL = $pdo->prepare("
+                                                INSERT INTO reservation_perday_details_booklogic (hotel_code, booking_id, date, rm_no, price, res_id, insertdate)
+                                                VALUES (:hc, :bid, :dt, :rmno, :price, :rid, NOW())
+                                            ");
+                                            $insPerDayBL->execute([
+                                                ':hc'    => $hotelCode,
+                                                ':bid'   => $bookingId,
+                                                ':dt'    => $pDate,
+                                                ':rmno'  => $pRmNo,
+                                                ':price' => $pPrice,
+                                                ':rid'   => $newResId
+                                            ]);
+                                        } catch (Exception $ePBL) {
+                                            // Fallback
+                                        }
+
+                                        try {
+                                            $insPerDay = $pdo->prepare("
+                                                INSERT INTO \"Reservation_PerDay_details\" (\"Hotel_Code\", \"Booking_Id\", \"Date\", \"rm_no\", \"Price\", \"Res_id\")
+                                                VALUES (:hc, :bid, :dt, :rmno, :price, :rid)
+                                            ");
+                                            $insPerDay->execute([
+                                                ':hc'    => $hotelCode,
+                                                ':bid'   => $bookingId,
+                                                ':dt'    => $pDate,
+                                                ':rmno'  => $pRmNo,
+                                                ':price' => $pPrice,
+                                                ':rid'   => $newResId
+                                            ]);
+                                        } catch (Exception $ePD) {
+                                            // Ignored if table name differs
+                                        }
                                     }
                                 }
                             }

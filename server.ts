@@ -1291,15 +1291,28 @@ app.post('/api/booklogic/sync-bookings', async (req, res) => {
             ]);
             const newResId = insRes.rows[0].Res_id;
 
-            // Details
-            await pgClient.query(`
-              INSERT INTO "Reservations_details" (
-                "Res_id", "NoofRooms", "RoomType", "Checkindate", "Checkoutdate",
-                "Netprice", "RoomTotal", "ExtrasTotal", "MealTotal", "Total",
-                "TaxIncluded", "TaxExcluded", "rate_name", "rate_id", "Availability_id",
-                "Availability_name", "Room_Id", "Room_Name"
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18);
-            `, [newResId, rooms, roomType, checkin, checkout, netPrice, roomTotal, extrasTotal, mealTotal, total, taxInc, taxExc, rateName, rateId, availId, availName, roomId, roomName]);
+            // Details into reservations_details_booklogic (and Reservations_details)
+            try {
+              await pgClient.query(`
+                INSERT INTO reservations_details_booklogic (
+                  res_id, noofrooms, roomtype, checkindate, checkoutdate,
+                  netprice, roomtotal, extrastotal, mealtotal, total,
+                  taxincluded, taxexcluded, rate_name, rate_id, availability_id,
+                  availability_name, room_id, room_name, insertdate
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW());
+              `, [newResId, rooms, roomType, checkin, checkout, netPrice, roomTotal, extrasTotal, mealTotal, total, taxInc, taxExc, rateName, rateId, availId, availName, roomId, roomName]);
+            } catch (eBL) {}
+
+            try {
+              await pgClient.query(`
+                INSERT INTO "Reservations_details" (
+                  "Res_id", "NoofRooms", "RoomType", "Checkindate", "Checkoutdate",
+                  "Netprice", "RoomTotal", "ExtrasTotal", "MealTotal", "Total",
+                  "TaxIncluded", "TaxExcluded", "rate_name", "rate_id", "Availability_id",
+                  "Availability_name", "Room_Id", "Room_Name"
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18);
+              `, [newResId, rooms, roomType, checkin, checkout, netPrice, roomTotal, extrasTotal, mealTotal, total, taxInc, taxExc, rateName, rateId, availId, availName, roomId, roomName]);
+            } catch (eDet) {}
 
             // Customer
             await pgClient.query(`
@@ -1308,15 +1321,25 @@ app.post('/api/booklogic/sync-bookings', async (req, res) => {
               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
             `, [newResId, firstName, lastName, email, tel, address, zip, location, country]);
 
-            // PerDay
+            // PerDay into reservation_perday_details_booklogic (and Reservation_PerDay_details)
             for (const pd of perDayArr) {
               const pDate = pd['@_date'] || pd.date || '';
               const pRmNo = String(pd['@_rm_no'] || pd.rm_no || '1');
               const pPrice = String(pd.Price || pd['#text'] || '0');
-              await pgClient.query(`
-                INSERT INTO "Reservation_PerDay_details" ("Hotel_Code", "Booking_Id", "Date", "rm_no", "Price", "Res_id")
-                VALUES ($1, $2, $3, $4, $5, $6);
-              `, [HotelCode, bookingId, pDate, pRmNo, pPrice, newResId]);
+
+              try {
+                await pgClient.query(`
+                  INSERT INTO reservation_perday_details_booklogic (hotel_code, booking_id, date, rm_no, price, res_id, insertdate)
+                  VALUES ($1, $2, $3, $4, $5, $6, NOW());
+                `, [HotelCode, bookingId, pDate, pRmNo, pPrice, newResId]);
+              } catch (ePBL) {}
+
+              try {
+                await pgClient.query(`
+                  INSERT INTO "Reservation_PerDay_details" ("Hotel_Code", "Booking_Id", "Date", "rm_no", "Price", "Res_id")
+                  VALUES ($1, $2, $3, $4, $5, $6);
+                `, [HotelCode, bookingId, pDate, pRmNo, pPrice, newResId]);
+              } catch (ePD) {}
             }
 
             // Log
@@ -1758,11 +1781,11 @@ async function executeFullAutoSyncCycle(customConfig?: any) {
             const resInsert = await pgClient.query(`
               INSERT INTO "Reservations" (
                 "Hotel_Code", "Booking_Id", "syncType", "PnrID", "ExternalReference",
-                "deposit", "Service", "TravelagentName", "UpdateDate", "Currency",
+                "deposit", "Service", "TravelagentName", "UpdateDate", "modifyDate", "cancelDate", "Currency",
                 "Status", "Adult", "Remarks", "Insertdate", "MarkSend"
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), 0)
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), 0)
               RETURNING "Res_id";
-            `, [hotelCode, b.Booking_Id, b.syncType, b.PnrID, b.ExternalReference, b.deposit, b.Service, b.TravelagentName, b.UpdateDate, b.Currency, b.Status, b.Adult, b.Remarks]);
+            `, [hotelCode, b.Booking_Id, b.syncType, b.PnrID, b.ExternalReference, b.deposit, b.Service, b.TravelagentName, b.UpdateDate, b.UpdateDate, '', b.Currency, b.Status, b.Adult, b.Remarks]);
             
             const newResId = resInsert.rows[0].Res_id;
 
@@ -1772,17 +1795,35 @@ async function executeFullAutoSyncCycle(customConfig?: any) {
             `, [newResId, b.Customer.FirstName, b.Customer.LastName, b.Customer.Email, b.Customer.Tel, b.Customer.Country]);
 
             for (const r of b.RoomDetails) {
-              await pgClient.query(`
-                INSERT INTO "Reservations_details" ("Res_id", "NoofRooms", "RoomType", "Checkindate", "Checkoutdate", "Total", "rate_name", "Room_Name")
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
-              `, [newResId, r.NoofRooms, r.RoomType, r.Checkindate, r.Checkoutdate, r.Total, r.rate_name, r.Room_Name]);
+              try {
+                await pgClient.query(`
+                  INSERT INTO reservations_details_booklogic (res_id, noofrooms, roomtype, checkindate, checkoutdate, total, rate_name, room_name, insertdate)
+                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW());
+                `, [newResId, r.NoofRooms, r.RoomType, r.Checkindate, r.Checkoutdate, r.Total, r.rate_name, r.Room_Name]);
+              } catch (eBL) {}
+
+              try {
+                await pgClient.query(`
+                  INSERT INTO "Reservations_details" ("Res_id", "NoofRooms", "RoomType", "Checkindate", "Checkoutdate", "Total", "rate_name", "Room_Name")
+                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+                `, [newResId, r.NoofRooms, r.RoomType, r.Checkindate, r.Checkoutdate, r.Total, r.rate_name, r.Room_Name]);
+              } catch (eDet) {}
             }
 
-            // Insert Reservation_PerDay_details linked with Res_id
-            await pgClient.query(`
-              INSERT INTO "Reservation_PerDay_details" ("Hotel_Code", "Booking_Id", "Date", "rm_no", "Price", "Res_id")
-              VALUES ($1, $2, $3, $4, $5, $6);
-            `, [hotelCode, b.Booking_Id, b.RoomDetails[0]?.Checkindate || new Date().toISOString().substring(0, 10), '1', String(b.RoomDetails[0]?.Total || '0'), newResId]);
+            // Insert reservation_perday_details_booklogic and Reservation_PerDay_details linked with Res_id
+            try {
+              await pgClient.query(`
+                INSERT INTO reservation_perday_details_booklogic (hotel_code, booking_id, date, rm_no, price, res_id, insertdate)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW());
+              `, [hotelCode, b.Booking_Id, b.RoomDetails[0]?.Checkindate || new Date().toISOString().substring(0, 10), '1', String(b.RoomDetails[0]?.Total || '0'), newResId]);
+            } catch (ePBL) {}
+
+            try {
+              await pgClient.query(`
+                INSERT INTO "Reservation_PerDay_details" ("Hotel_Code", "Booking_Id", "Date", "rm_no", "Price", "Res_id")
+                VALUES ($1, $2, $3, $4, $5, $6);
+              `, [hotelCode, b.Booking_Id, b.RoomDetails[0]?.Checkindate || new Date().toISOString().substring(0, 10), '1', String(b.RoomDetails[0]?.Total || '0'), newResId]);
+            } catch (ePD) {}
 
             await pgClient.query('COMMIT');
             stats.bookingsInserted++;
