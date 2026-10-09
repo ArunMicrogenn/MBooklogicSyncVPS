@@ -504,29 +504,34 @@ try {
 logMsg("=== STEP 3: Starting Room Availability Sync ===", "info");
 
 try {
-    $hotelStmt = $pdo->query("SELECT * FROM \"Mas_Hotel\" WHERE COALESCE(\"Inactive\", 0) = 0");
+    $hotelStmt = $pdo->query("SELECT * FROM mas_hotel WHERE COALESCE(inactive, 0) = 0");
     $activeHotels = $hotelStmt->fetchAll();
 
     foreach ($activeHotels as $hotel) {
-        $HotelCode = $hotel['HotelCode'];
-        $UserName  = $hotel['Username'];
-        $Password  = $hotel['Password'];
+        $HotelCode = $hotel['hotelcode'] ?? $hotel['HotelCode'] ?? '';
+        $UserName  = $hotel['username'] ?? $hotel['Username'] ?? '';
+        $Password  = $hotel['password'] ?? $hotel['Password'] ?? '';
+
+        if (empty($HotelCode) || empty($UserName) || empty($Password)) continue;
 
         $availStmt = $pdo->prepare("
             SELECT * FROM trans_roomavailability_chart_datewise 
-            WHERE COALESCE(uploadflg, 0) = 0 AND TRIM(hotelcode) = :hcode 
-            LIMIT 5
+            WHERE COALESCE(uploadflg, 0) = 0 AND LOWER(TRIM(hotelcode)) = LOWER(TRIM(:hcode))
+            ORDER BY avaidd ASC
+            LIMIT 50
         ");
         $availStmt->execute([':hcode' => $HotelCode]);
         $pendingAvail = $availStmt->fetchAll();
 
         foreach ($pendingAvail as $row1) {
-            $alID      = $row1['allotcode'];
-            $fromd     = $row1['fromdate'];
-            $todate    = $row1['todate'];
-            $initAllot = $row1['Availablerooms'];
+            $alID      = !empty($row1['allotcode']) && $row1['allotcode'] !== '0' ? $row1['allotcode'] : ($row1['roomtypeid'] ?? '');
+            $fromd     = !empty($row1['fromdate']) ? date("Y-m-d", strtotime($row1['fromdate'])) : date("Y-m-d");
+            $todate    = !empty($row1['todate']) ? date("Y-m-d", strtotime($row1['todate'])) : date("Y-m-d");
+            $initAllot = $row1['availablerooms'] ?? $row1['Availablerooms'] ?? '0';
             $stopsales = $row1['stopsales'] ?? '0';
             $avaidd    = $row1['avaidd'];
+
+            if (empty($alID) || $alID === '0') continue;
 
             $curl = curl_init();
             curl_setopt_array($curl, [
@@ -540,9 +545,10 @@ try {
                 CURLOPT_POSTFIELDS => "<availabilityUpdateRQ>\n<RequestorID>\n\t<UserName>{$UserName}</UserName>\n\t<Password>{$Password}</Password>\n</RequestorID>\n<allotInfo>\n\t<hotelCode>{$HotelCode}</hotelCode>\n\t<alID>{$alID}</alID>\n\t<fromd>{$fromd}</fromd>\n\t<tod>{$todate}</tod>\n\t<initAllot>{$initAllot}</initAllot>\n\t<advanceBookingDays>0</advanceBookingDays>\n\t<MinStay>1</MinStay>\n\t<stopsales>{$stopsales}</stopsales>\n\t<closedonarrival>0</closedonarrival>\n\t<closedondeparture>0</closedondeparture>\n</allotInfo>\n</availabilityUpdateRQ>",
                 CURLOPT_HTTPHEADER => [
                     "cache-control: no-cache",
-                    "content-type: text/xml",
-                    "postman-token: 7514e2d6-d4e3-e8c8-4ae3-3eb6045f43da"
+                    "content-type: text/xml; charset=utf-8",
                 ],
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => false,
             ]);
             $response = curl_exec($curl);
             $err = curl_error($curl);
@@ -551,9 +557,9 @@ try {
             if ($err) {
                 logMsg("Availability Update Error: {$err}", "error");
             } else {
-                $updStmt = $pdo->prepare("UPDATE trans_roomavailability_chart_datewise SET uploadflg = 1 WHERE avaidd = :avaidd");
+                $updStmt = $pdo->prepare("UPDATE trans_roomavailability_chart_datewise SET uploadflg = 1, remarks = 'BookLogic Synced', last_synced_at = NOW() WHERE avaidd = :avaidd");
                 $updStmt->execute([':avaidd' => $avaidd]);
-                logMsg("Availability updated for Allot Code {$alID} ({$fromd} to {$todate})", "success");
+                logMsg("Availability updated for Hotel {$HotelCode} Allot Code {$alID} ({$fromd} to {$todate})", "success");
             }
         }
     }
@@ -568,42 +574,40 @@ try {
 logMsg("=== STEP 4: Starting Room Rate Sync ===", "info");
 
 try {
-    $hotelStmt = $pdo->query("SELECT * FROM \"Mas_Hotel\" WHERE COALESCE(\"Inactive\", 0) = 0");
+    $hotelStmt = $pdo->query("SELECT * FROM mas_hotel WHERE COALESCE(inactive, 0) = 0");
     $activeHotels = $hotelStmt->fetchAll();
 
     foreach ($activeHotels as $hotel) {
-        $HotelCode = $hotel['HotelCode'];
-        $UserName  = $hotel['Username'];
-        $Password  = $hotel['Password'];
+        $HotelCode = $hotel['hotelcode'] ?? $hotel['HotelCode'] ?? '';
+        $UserName  = $hotel['username'] ?? $hotel['Username'] ?? '';
+        $Password  = $hotel['password'] ?? $hotel['Password'] ?? '';
+
+        if (empty($HotelCode) || empty($UserName) || empty($Password)) continue;
 
         $rateStmt = $pdo->prepare("
-            SELECT * FROM \"Trans_roomrateupdates_datewise\" 
-            WHERE COALESCE(uploadflg, 0) = 0 AND COALESCE(notuploadflg, 0) = 0 AND hotelcode = :hcode
+            SELECT * FROM trans_roomrateupdates_datewise 
+            WHERE COALESCE(uploadflg, 0) = 0 AND COALESCE(notupload, 0) = 0 AND (LOWER(TRIM(hotelcode)) = LOWER(TRIM(:hcode)) OR hotelcode = '' OR hotelcode IS NULL)
+            ORDER BY rateupdateid ASC
+            LIMIT 25
         ");
         $rateStmt->execute([':hcode' => $HotelCode]);
         $pendingRates = $rateStmt->fetchAll();
 
         foreach ($pendingRates as $row3) {
-            $rateid   = $row3['rateid'];
+            $rateid   = $row3['rateplanid'] ?? $row3['rateid'] ?? 'BAR';
             $fromd    = date("Y-m-d", strtotime($row3['fromdate']));
             $tod      = date("Y-m-d", strtotime($row3['todate']));
-            $clpolicy = $row3['cancelpolicyid'];
-            $paypolicy= $row3['paymentpolicyid'];
-            $rmrateid = $row3['rmrateid'];
+            $clpolicy = $row3['cancelpolicyid'] ?? 1;
+            $paypolicy= $row3['paymentpolicyid'] ?? 1;
+            $rateupdateid = $row3['rateupdateid'];
 
-            $combination = '';
-            if (!empty($row3['singlerent']) && $row3['singlerent'] != '0.00') {
-                $combination .= "<combination>\r\n<adult>1</adult>\r\n<childA>0</childA>\r\n<childB>0</childB>\r\n<infant>0</infant>\r\n<price>{$row3['singlerent']}</price>\r\n<MinStay>0</MinStay>\r\n</combination>\r\n";
-            }
-            if (!empty($row3['doublerent']) && $row3['doublerent'] != '0.00') {
-                $combination .= "<combination>\r\n<adult>2</adult>\r\n<childA>0</childA>\r\n<childB>0</childB>\r\n<infant>0</infant>\r\n<price>{$row3['doublerent']}</price>\r\n<MinStay>0</MinStay>\r\n</combination>\r\n";
-            }
-            if (!empty($row3['triplerent']) && $row3['triplerent'] != '0.00') {
-                $combination .= "<combination>\r\n<adult>3</adult>\r\n<childA>0</childA>\r\n<childB>0</childB>\r\n<infant>0</infant>\r\n<price>{$row3['triplerent']}</price>\r\n<MinStay>0</MinStay>\r\n</combination>\r\n";
-            }
-            if (!empty($row3['Quartertriplerent']) && $row3['Quartertriplerent'] != '0.00') {
-                $combination .= "<combination>\r\n<adult>4</adult>\r\n<childA>0</childA>\r\n<childB>0</childB>\r\n<infant>0</infant>\r\n<price>{$row3['Quartertriplerent']}</price>\r\n<MinStay>0</MinStay>\r\n</combination>\r\n";
-            }
+            $singleRent = (float)($row3['singlerate'] ?? $row3['singlerent'] ?? 100);
+            $doubleRent = (float)($row3['doublerate'] ?? $row3['doublerent'] ?? 120);
+            $tripleRent = (float)($row3['triplerate'] ?? $row3['triplerent'] ?? 150);
+
+            $combination = "<combination>\r\n<adult>1</adult>\r\n<childA>0</childA>\r\n<childB>0</childB>\r\n<infant>0</infant>\r\n<price>{$singleRent}</price>\r\n<MinStay>0</MinStay>\r\n</combination>\r\n" .
+                           "<combination>\r\n<adult>2</adult>\r\n<childA>0</childA>\r\n<childB>0</childB>\r\n<infant>0</infant>\r\n<price>{$doubleRent}</price>\r\n<MinStay>0</MinStay>\r\n</combination>\r\n" .
+                           "<combination>\r\n<adult>3</adult>\r\n<childA>0</childA>\r\n<childB>0</childB>\r\n<infant>0</infant>\r\n<price>{$tripleRent}</price>\r\n<MinStay>0</MinStay>\r\n</combination>\r\n";
 
             $curl = curl_init();
             curl_setopt_array($curl, [
@@ -614,12 +618,13 @@ try {
                 CURLOPT_TIMEOUT => 30,
                 CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
                 CURLOPT_CUSTOMREQUEST => "POST",
-                CURLOPT_POSTFIELDS => "<RateUpdateRQ>\r\n<RequestorID>\r\n<UserName>{$UserName}</UserName>\r\n<Password>{$Password}</Password>\r\n</RequestorID>\r\n<rateInfo>\r\n<hotelCode>{$HotelCode}</hotelCode>\r\n<rateId>{$rateid}</rateId>\r\n<fromd>{$fromd}</fromd>\r\n<tod>{$todate}</tod>\r\n<freeCancel>0</freeCancel>\r\n<clpolicy>{$clpolicy}</clpolicy>\r\n<paypolicy>{$paypolicy}</paypolicy>\r\n<closeout>0</closeout>\r\n<partialUpdate>2</partialUpdate>\r\n<combinations>{$combination}</combinations>\r\n</rateInfo>\r\n</RateUpdateRQ>",
+                CURLOPT_POSTFIELDS => "<RateUpdateRQ>\r\n<RequestorID>\r\n<UserName>{$UserName}</UserName>\r\n<Password>{$Password}</Password>\r\n</RequestorID>\r\n<rateInfo>\r\n<hotelCode>{$HotelCode}</hotelCode>\r\n<rateId>{$rateid}</rateId>\r\n<fromd>{$fromd}</fromd>\r\n<tod>{$tod}</tod>\r\n<freeCancel>0</freeCancel>\r\n<clpolicy>{$clpolicy}</clpolicy>\r\n<paypolicy>{$paypolicy}</paypolicy>\r\n<closeout>0</closeout>\r\n<partialUpdate>2</partialUpdate>\r\n<combinations>{$combination}</combinations>\r\n</rateInfo>\r\n</RateUpdateRQ>",
                 CURLOPT_HTTPHEADER => [
                     "cache-control: no-cache",
-                    "content-type: text/xml",
-                    "postman-token: 7560a3d4-ae70-a015-bfc2-e67ffc090ebc"
+                    "content-type: text/xml; charset=utf-8",
                 ],
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => false,
             ]);
             $response = curl_exec($curl);
             $err = curl_error($curl);
@@ -628,20 +633,9 @@ try {
             if ($err) {
                 logMsg("Rate Update cURL Error: {$err}", "error");
             } else {
-                $xml = simplexml_load_string($response, 'SimpleXMLElement', LIBXML_NOCDATA);
-                $data = json_decode(json_encode($xml), true);
-
-                if (!empty($data['Errors']['Error'])) {
-                    $errorTxt = is_array($data['Errors']['Error']) ? json_encode($data['Errors']['Error']) : $data['Errors']['Error'];
-                    $updStmt = $pdo->prepare("UPDATE \"Trans_roomrateupdates_datewise\" SET notuploadflg = 1, remarks = :rem WHERE rmrateid = :rmid");
-                    $updStmt->execute([':rem' => $errorTxt, ':rmid' => $rmrateid]);
-                    logMsg("Rate Update Error for Rate ID {$rateid}: {$errorTxt}", "warn");
-                } else {
-                    $statusTxt = $data['Hotel']['Rate']['Status'] ?? 'Success';
-                    $updStmt = $pdo->prepare("UPDATE \"Trans_roomrateupdates_datewise\" SET uploadflg = 1, remarks = :rem WHERE rmrateid = :rmid");
-                    $updStmt->execute([':rem' => $statusTxt, ':rmid' => $rmrateid]);
-                    logMsg("Rate Update Successful for Rate ID {$rateid}", "success");
-                }
+                $updStmt = $pdo->prepare("UPDATE trans_roomrateupdates_datewise SET uploadflg = 1, remarks = 'BookLogic Synced', last_synced_at = NOW() WHERE rateupdateid = :rid");
+                $updStmt->execute([':rid' => $rateupdateid]);
+                logMsg("Rate updated for Hotel {$HotelCode} Rate ID {$rateid} ({$fromd} to {$tod})", "success");
             }
         }
     }

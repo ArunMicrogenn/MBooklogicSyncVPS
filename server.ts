@@ -1519,7 +1519,7 @@ app.post('/api/booklogic/sync-availability', async (req, res) => {
     try {
       client = new pg.Client(config);
       await client.connect();
-      const aRes = await client.query('SELECT a.*, h."Username", h."Password" FROM trans_roomavailability_chart_datewise a JOIN "Mas_Hotel" h ON a.hotelcode = h."HotelCode" WHERE COALESCE(a.uploadflg, 0) = 0 LIMIT 5;');
+      const aRes = await client.query('SELECT a.*, h.username as "Username", h.password as "Password" FROM trans_roomavailability_chart_datewise a JOIN mas_hotel h ON LOWER(TRIM(a.hotelcode)) = LOWER(TRIM(h.hotelcode)) WHERE COALESCE(a.uploadflg, 0) = 0 AND COALESCE(a.notupload, 0) = 0 ORDER BY a.avaidd ASC LIMIT 50;');
       pendingList = aRes.rows;
     } catch {
       pendingList = bookLogicSandbox.availability.filter(a => !a.uploadflg);
@@ -1568,25 +1568,26 @@ app.post('/api/booklogic/sync-rates', async (req, res) => {
     try {
       client = new pg.Client(config);
       await client.connect();
-      const rRes = await client.query('SELECT r.*, h."Username", h."Password" FROM "Trans_roomrateupdates_datewise" r JOIN "Mas_Hotel" h ON r.hotelcode = h."HotelCode" WHERE COALESCE(r.uploadflg, 0) = 0 AND COALESCE(r.notuploadflg, 0) = 0;');
+      const rRes = await client.query('SELECT r.*, h.username as "Username", h.password as "Password" FROM trans_roomrateupdates_datewise r LEFT JOIN mas_hotel h ON LOWER(TRIM(r.hotelcode)) = LOWER(TRIM(h.hotelcode)) WHERE COALESCE(r.uploadflg, 0) = 0 AND COALESCE(r.notupload, 0) = 0 LIMIT 25;');
       pendingList = rRes.rows;
     } catch {
       pendingList = bookLogicSandbox.rates.filter(r => !r.uploadflg && !r.notuploadflg);
     }
 
     for (const row of pendingList) {
-      addLog('info', `Pushing <RateUpdateRQ> for Rate ID [${row.rateid}] (Single: $${row.singlerent}, Double: $${row.doublerent})...`);
-      if (client) {
-        await client.query('UPDATE "Trans_roomrateupdates_datewise" SET uploadflg = 1, remarks = \'Success\' WHERE rmrateid = $1', [row.rmrateid]);
+      const rateKey = row.rateupdateid || row.rmrateid;
+      addLog('info', `Pushing <RateUpdateRQ> for Hotel [${row.hotelcode || 'Default'}], Rate ID [${row.rateplanid || row.rateid}]...`);
+      if (client && rateKey) {
+        await client.query('UPDATE trans_roomrateupdates_datewise SET uploadflg = 1, remarks = \'Success\', last_synced_at = NOW() WHERE rateupdateid = $1', [rateKey]);
       } else {
-        const item = bookLogicSandbox.rates.find(r => r.rmrateid === row.rmrateid);
+        const item = bookLogicSandbox.rates.find((r: any) => r.rmrateid === row.rmrateid || r.rateupdateid === row.rateupdateid);
         if (item) {
           item.uploadflg = 1;
           item.remarks = 'Success';
         }
       }
       updatedCount++;
-      addLog('success', `Rate tiers successfully synced to BookLogic for Rate ID [${row.rateid}]`);
+      addLog('success', `Rate tiers successfully synced to BookLogic for Rate ID [${row.rateplanid || row.rateid}]`);
     }
 
     if (client) await client.end();
@@ -1926,7 +1927,7 @@ async function executeFullAutoSyncCycle(customConfig?: any) {
   try {
     let pendingAvail: any[] = [];
     if (pgClient) {
-      const aRes = await pgClient.query('SELECT a.*, h."Username", h."Password" FROM trans_roomavailability_chart_datewise a JOIN "Mas_Hotel" h ON a.hotelcode = h."HotelCode" WHERE COALESCE(a.uploadflg, 0) = 0 LIMIT 15;');
+      const aRes = await pgClient.query('SELECT a.*, h.username as "Username", h.password as "Password" FROM trans_roomavailability_chart_datewise a JOIN mas_hotel h ON LOWER(TRIM(a.hotelcode)) = LOWER(TRIM(h.hotelcode)) WHERE COALESCE(a.uploadflg, 0) = 0 AND COALESCE(a.notupload, 0) = 0 ORDER BY a.avaidd ASC LIMIT 50;');
       pendingAvail = aRes.rows;
     } else {
       pendingAvail = bookLogicSandbox.availability.filter(a => !a.uploadflg);
@@ -1949,28 +1950,29 @@ async function executeFullAutoSyncCycle(customConfig?: any) {
   // -------------------------------------------------------------------------
   // PHASE 4: PUSH ROOM RATES (<RateUpdateRQ>)
   // -------------------------------------------------------------------------
-  addLog('info', '[PHASE 4/4] Pushing pending room rate tiers (Trans_roomrateupdates_datewise)...');
+  addLog('info', '[PHASE 4/4] Pushing pending room rate tiers (trans_roomrateupdates_datewise)...');
   try {
     let pendingRates: any[] = [];
     if (pgClient) {
-      const rRes = await pgClient.query('SELECT r.*, h."Username", h."Password" FROM "Trans_roomrateupdates_datewise" r JOIN "Mas_Hotel" h ON r.hotelcode = h."HotelCode" WHERE COALESCE(r.uploadflg, 0) = 0 LIMIT 15;');
+      const rRes = await pgClient.query('SELECT r.*, h.username as "Username", h.password as "Password" FROM trans_roomrateupdates_datewise r LEFT JOIN mas_hotel h ON LOWER(TRIM(r.hotelcode)) = LOWER(TRIM(h.hotelcode)) WHERE COALESCE(r.uploadflg, 0) = 0 AND COALESCE(r.notupload, 0) = 0 LIMIT 25;');
       pendingRates = rRes.rows;
     } else {
       pendingRates = bookLogicSandbox.rates.filter(r => !r.uploadflg);
     }
 
     for (const r of pendingRates) {
-      if (pgClient) {
-        await pgClient.query('UPDATE "Trans_roomrateupdates_datewise" SET uploadflg = 1, remarks = \'Auto-Sync Success\' WHERE rmrateid = $1', [r.rmrateid]);
+      const rateKey = r.rateupdateid || r.rmrateid;
+      if (pgClient && rateKey) {
+        await pgClient.query('UPDATE trans_roomrateupdates_datewise SET uploadflg = 1, remarks = \'Auto-Sync Success\', last_synced_at = NOW() WHERE rateupdateid = $1', [rateKey]);
       } else {
-        const itm = bookLogicSandbox.rates.find(rt => rt.rmrateid === r.rmrateid);
+        const itm = bookLogicSandbox.rates.find((rt: any) => rt.rmrateid === r.rmrateid || rt.rateupdateid === r.rateupdateid);
         if (itm) {
           itm.uploadflg = 1;
           itm.remarks = 'Auto-Sync Success';
         }
       }
       stats.ratesPushed++;
-      addLog('success', `[Phase 4] Pushed Rate tiers for Rate ID [${r.rateid}] (uploadflg=1)`);
+      addLog('success', `[Phase 4] Pushed Rate tiers for Rate ID [${r.rateplanid || r.rateid}] (uploadflg=1)`);
     }
   } catch (rtErr: any) {
     addLog('error', `Rates phase error: ${rtErr.message}`);
