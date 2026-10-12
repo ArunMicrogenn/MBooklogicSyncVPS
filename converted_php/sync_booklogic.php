@@ -160,6 +160,22 @@ try {
 logMsg("=== STEP 2: Starting BookLogic Reservation Ingestion ===", "info");
 
 try {
+    $pdo->exec("
+        CREATE OR REPLACE VIEW reservation_perday_details AS
+        SELECT 
+            \"id\",
+            \"Hotel_Code\" AS hotel_code,
+            \"Booking_Id\" AS booking_id,
+            \"Date\" AS date,
+            \"rm_no\",
+            \"Price\" AS price,
+            \"Res_id\" AS res_id,
+            \"created_at\"
+        FROM \"Reservation_PerDay_details\";
+    ");
+} catch (Exception $eTbl) {}
+
+try {
     $hotelStmt = $pdo->query("SELECT hotelcode as \"HotelCode\", username as \"Username\", password as \"Password\", COALESCE(inactive, 0) as \"Inactive\" FROM mas_hotel WHERE COALESCE(inactive, 0) = 0");
     $activeHotels = $hotelStmt->fetchAll();
 
@@ -283,10 +299,10 @@ try {
                         \"Hotel_Code\", \"Booking_Id\", \"syncType\", \"PnrID\", \"ExternalReference\",
                         \"ExternalReservationRoomId\", \"ExternalReservationId\", \"deposit\", \"Service\",
                         \"TravelagentName\", \"UpdateDate\", \"modifyDate\", \"cancelDate\", \"Currency\",
-                        \"Status\", \"Adult\", \"ChildB\", \"ChildA\", \"Infant\", \"Remarks\", \"Insertdate\", \"MarkSend\"
+                        \"Status\", \"Adult\", \"ChildB\", \"ChildA\", \"Infant\", \"Remarks\", \"Insertdate\", \"MarkSend\", \"Updateflag\"
                     ) VALUES (
                         :hc, :bid, :st, :pnr, :extref, :exrrid, :exrid, :dep, :srv,
-                        :ta, :ud, :md, :cd, :curr, :status, :ad, :cb, :ca, :inf, :rem, :idate, 0
+                        :ta, :ud, :md, :cd, :curr, :status, :ad, :cb, :ca, :inf, :rem, :idate, 0, 0
                     ) RETURNING \"Res_id\"
                 ");
 
@@ -317,41 +333,7 @@ try {
                 $resRow = $insRes->fetch();
                 $newResId = $resRow['Res_id'];
 
-                // 2. Insert into reservations_details_booklogic and Reservations_details
-                try {
-                    $insDetBL = $pdo->prepare("
-                        INSERT INTO reservations_details_booklogic (
-                            res_id, noofrooms, roomtype, checkindate, checkoutdate,
-                            netprice, roomtotal, extrastotal, mealtotal, total,
-                            taxincluded, taxexcluded, rate_name, rate_id, availability_id,
-                            availability_name, room_id, room_name, insertdate
-                        ) VALUES (
-                            :rid, :nr, :rt, :cin, :cout, :np, :rtot, :extot, :mtot, :tot,
-                            :tinc, :texc, :rname, :ridx, :avid, :avname, :rmid, :rmname, NOW()
-                        )
-                    ");
-                    $insDetBL->execute([
-                        ':rid'    => $newResId,
-                        ':nr'     => $Rooms,
-                        ':rt'     => $Room,
-                        ':cin'    => $Checkin,
-                        ':cout'   => $Checkout,
-                        ':np'     => $Netprice,
-                        ':rtot'   => $RoomTotal,
-                        ':extot'  => $ExtrasTotal,
-                        ':mtot'   => $MealTotal,
-                        ':tot'    => $Total,
-                        ':tinc'   => $TaxIncluded,
-                        ':texc'   => $TaxExcluded,
-                        ':rname'  => $rate,
-                        ':ridx'   => $rate_id,
-                        ':avid'   => $Availability_id,
-                        ':avname' => $Availability_name,
-                        ':rmid'   => $Room_Id,
-                        ':rmname' => $Room_Name
-                    ]);
-                } catch (Exception $eBL) {}
-
+                // 2. Insert into Reservations_details and reservations_details_booklogic
                 try {
                     $insDet = $pdo->prepare("
                         INSERT INTO \"Reservations_details\" (
@@ -407,7 +389,7 @@ try {
                     ':ctry'  => $Country
                 ]);
 
-                // 4. Insert PerDay breakdown into reservation_perday_details_booklogic and Reservation_PerDay_details
+                // 4. Insert PerDay breakdown into Reservation_PerDay_details
                 $perDayArr = $datas['PerDay'] ?? [];
                 if (!empty($perDayArr)) {
                     $perDayList = isset($perDayArr['@attributes']) || isset($perDayArr['Price']) ? [$perDayArr] : $perDayArr;
@@ -415,21 +397,6 @@ try {
                         $pDate  = $pItem['@attributes']['date'] ?? ($pItem['date'] ?? '');
                         $pRmNo  = $pItem['@attributes']['rm_no'] ?? ($pItem['rm_no'] ?? '');
                         $pPrice = $pItem['Price'] ?? '0';
-
-                        try {
-                            $insPerDayBL = $pdo->prepare("
-                                INSERT INTO reservation_perday_details_booklogic (hotel_code, booking_id, date, rm_no, price, res_id, insertdate)
-                                VALUES (:hc, :bid, :dt, :rmno, :price, :rid, NOW())
-                            ");
-                            $insPerDayBL->execute([
-                                ':hc'    => $HotelCode,
-                                ':bid'   => $Booking_Id,
-                                ':dt'    => $pDate,
-                                ':rmno'  => $pRmNo,
-                                ':price' => $pPrice,
-                                ':rid'   => $newResId
-                            ]);
-                        } catch (Exception $ePBL) {}
 
                         try {
                             $insPerDay = $pdo->prepare("

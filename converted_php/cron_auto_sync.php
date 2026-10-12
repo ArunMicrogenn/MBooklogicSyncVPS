@@ -56,6 +56,23 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null, $force_avail = f
         logCli("Found " . count($hotels) . " active hotel(s) in mas_hotel table.");
     }
 
+    // Ensure case-insensitive view for reservation_perday_details exists
+    try {
+        $pdo->exec("
+            CREATE OR REPLACE VIEW reservation_perday_details AS
+            SELECT 
+                \"id\",
+                \"Hotel_Code\" AS hotel_code,
+                \"Booking_Id\" AS booking_id,
+                \"Date\" AS date,
+                \"rm_no\",
+                \"Price\" AS price,
+                \"Res_id\" AS res_id,
+                \"created_at\"
+            FROM \"Reservation_PerDay_details\";
+        ");
+    } catch (Exception $eView) {}
+
     // =========================================================================
     // PHASE 1: FETCH BOOKINGS (<syncBookingRQ>) & INSERT DETAILS TABLES
     // =========================================================================
@@ -156,13 +173,18 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null, $force_avail = f
                     $infant       = (string)($b->Infant ?? '0');
                     $remarks      = (string)($b->Remarks ?? 'BookLogic Live Ingest');
 
-                    $chk = $pdo->prepare("SELECT \"Res_id\" FROM \"Reservations\" WHERE \"Booking_Id\" = :bid AND \"syncType\" = :st LIMIT 1");
+                    $chk = $pdo->prepare("SELECT \"Res_id\", COALESCE(\"MarkSend\", 0) as ms FROM \"Reservations\" WHERE \"Booking_Id\" = :bid AND \"syncType\" = :st LIMIT 1");
                     $chk->execute([':bid' => $Booking_Id, ':st' => $syncType]);
-                    $existingResId = $chk->fetchColumn();
+                    $existingRow = $chk->fetch(PDO::FETCH_ASSOC);
 
-                    $Res_id = $existingResId;
+                    $Res_id = null;
+                    $needMarkSend = false;
 
-                    if (!$existingResId) {
+                    if ($existingRow) {
+                        $Res_id = $existingRow['Res_id'];
+                        $needMarkSend = ((int)$existingRow['ms'] === 0);
+                        logCli("Booking ID: {$Booking_Id} already exists in database (Res_id: {$Res_id}, MarkSend: {$existingRow['ms']})", "INFO");
+                    } else {
                         $pdo->beginTransaction();
                         try {
                             $insRes = $pdo->prepare("
@@ -170,12 +192,12 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null, $force_avail = f
                                     \"Hotel_Code\", \"Booking_Id\", \"syncType\", \"PnrID\", \"ExternalReference\",
                                     \"ExternalReservationRoomId\", \"ExternalReservationId\", \"deposit\", \"Service\",
                                     \"TravelagentName\", \"UpdateDate\", \"modifyDate\", \"cancelDate\", \"Currency\",
-                                    \"Status\", \"Adult\", \"ChildB\", \"ChildA\", \"Infant\", \"Remarks\", \"Insertdate\", \"MarkSend\"
+                                    \"Status\", \"Adult\", \"ChildB\", \"ChildA\", \"Infant\", \"Remarks\", \"Insertdate\", \"MarkSend\", \"Updateflag\"
                                 ) VALUES (
                                     :hc, :bid, :st, :pnr, :ext,
                                     :exrrid, :exrid, :dep, :srv,
                                     :ta, :ud, :md, :cd, :curr,
-                                    :stat, :adult, :cb, :ca, :inf, :rem, NOW(), 0
+                                    :stat, :adult, :cb, :ca, :inf, :rem, NOW(), 0, 0
                                 ) RETURNING \"Res_id\"
                             ");
                             $insRes->execute([
@@ -241,42 +263,6 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null, $force_avail = f
                                 $rmNameAttrs = isset($room->rmName) && is_object($room->rmName) ? $room->rmName->attributes() : [];
 
                                 try {
-                                    $insDetBL = $pdo->prepare("
-                                        INSERT INTO reservations_details_booklogic (
-                                            res_id, noofrooms, roomtype, checkindate, checkoutdate,
-                                            netprice, roomtotal, extrastotal, mealtotal, total,
-                                            taxincluded, taxexcluded, rate_name, rate_id, availability_id,
-                                            availability_name, room_id, room_name, insertdate
-                                        ) VALUES (
-                                            :rid, :nr, :rt, :cin, :cout,
-                                            :np, :rtot, :extot, :mtot, :tot,
-                                            :tinc, :texc, :rname, :ridx, :avid,
-                                            :avname, :rmid, :rmname, NOW()
-                                        )
-                                    ");
-                                    $insDetBL->execute([
-                                        ':rid'    => $Res_id,
-                                        ':nr'     => (string)($room->Rooms ?? $room->NoofRooms ?? '1'),
-                                        ':rt'     => (string)($room->Room ?? $room->RoomType ?? ''),
-                                        ':cin'    => (string)($room->Checkin ?? $room->Checkindate ?? date('Y-m-d')),
-                                        ':cout'   => (string)($room->Checkout ?? $room->Checkoutdate ?? date('Y-m-d', strtotime('+1 day'))),
-                                        ':np'     => (string)($room->Netprice ?? '0'),
-                                        ':rtot'   => (string)($room->roomTotal ?? $room->RoomTotal ?? '0'),
-                                        ':extot'  => (string)($room->ExtrasTotal ?? '0'),
-                                        ':mtot'   => (string)($room->MealTotal ?? '0'),
-                                        ':tot'    => (string)($room->Total ?? $room->RoomTotal ?? '0'),
-                                        ':tinc'   => (string)($room->TaxIncluded ?? '0'),
-                                        ':texc'   => (string)($room->TaxExcluded ?? '0'),
-                                        ':rname'  => (string)($room->rate ?? $room->rate_name ?? ''),
-                                        ':ridx'   => (string)($rateAttrs['id'] ?? $room->rate_id ?? ''),
-                                        ':avid'   => (string)($allotAttrs['id'] ?? $room->Availability_id ?? ''),
-                                        ':avname' => (string)($room->allot ?? $room->Availability_name ?? ''),
-                                        ':rmid'   => (string)($rmNameAttrs['id'] ?? $room->Room_Id ?? ''),
-                                        ':rmname' => (string)($room->rmName ?? $room->Room_Name ?? '')
-                                    ]);
-                                } catch (Exception $eBL) {}
-
-                                try {
                                     $insDet = $pdo->prepare("
                                         INSERT INTO \"Reservations_details\" (
                                             \"Res_id\", \"NoofRooms\", \"RoomType\", \"Checkindate\", \"Checkoutdate\",
@@ -311,6 +297,46 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null, $force_avail = f
                                         ':rmname' => (string)($room->rmName ?? $room->Room_Name ?? '')
                                     ]);
                                 } catch (Exception $eDet) {}
+
+                                try {
+                                    $pdo->exec("SAVEPOINT sp_det_bl");
+                                    $insDetBL = $pdo->prepare("
+                                        INSERT INTO reservations_details_booklogic (
+                                            res_id, noofrooms, roomtype, checkindate, checkoutdate,
+                                            netprice, roomtotal, extrastotal, mealtotal, total,
+                                            taxincluded, taxexcluded, rate_name, rate_id, availability_id,
+                                            availability_name, room_id, room_name, insertdate
+                                        ) VALUES (
+                                            :rid, :nr, :rt, :cin, :cout,
+                                            :np, :rtot, :extot, :mtot, :tot,
+                                            :tinc, :texc, :rname, :ridx, :avid,
+                                            :avname, :rmid, :rmname, NOW()
+                                        )
+                                    ");
+                                    $insDetBL->execute([
+                                        ':rid'    => $Res_id,
+                                        ':nr'     => (string)($room->Rooms ?? $room->NoofRooms ?? '1'),
+                                        ':rt'     => (string)($room->Room ?? $room->RoomType ?? ''),
+                                        ':cin'    => (string)($room->Checkin ?? $room->Checkindate ?? date('Y-m-d')),
+                                        ':cout'   => (string)($room->Checkout ?? $room->Checkoutdate ?? date('Y-m-d', strtotime('+1 day'))),
+                                        ':np'     => (string)($room->Netprice ?? '0'),
+                                        ':rtot'   => (string)($room->roomTotal ?? $room->RoomTotal ?? '0'),
+                                        ':extot'  => (string)($room->ExtrasTotal ?? '0'),
+                                        ':mtot'   => (string)($room->MealTotal ?? '0'),
+                                        ':tot'    => (string)($room->Total ?? $room->RoomTotal ?? '0'),
+                                        ':tinc'   => (string)($room->TaxIncluded ?? '0'),
+                                        ':texc'   => (string)($room->TaxExcluded ?? '0'),
+                                        ':rname'  => (string)($room->rate ?? $room->rate_name ?? ''),
+                                        ':ridx'   => (string)($rateAttrs['id'] ?? $room->rate_id ?? ''),
+                                        ':avid'   => (string)($allotAttrs['id'] ?? $room->Availability_id ?? ''),
+                                        ':avname' => (string)($room->allot ?? $room->Availability_name ?? ''),
+                                        ':rmid'   => (string)($rmNameAttrs['id'] ?? $room->Room_Id ?? ''),
+                                        ':rmname' => (string)($room->rmName ?? $room->Room_Name ?? '')
+                                    ]);
+                                    $pdo->exec("RELEASE SAVEPOINT sp_det_bl");
+                                } catch (Exception $eBL) {
+                                    $pdo->exec("ROLLBACK TO SAVEPOINT sp_det_bl");
+                                }
                             }
 
                             // Per Day Breakdown
@@ -332,21 +358,6 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null, $force_avail = f
                                         $pPrice  = (string)($pItem->Price ?? ($pItem['Price'] ?? '0'));
 
                                         try {
-                                            $insPerDayBL = $pdo->prepare("
-                                                INSERT INTO reservation_perday_details_booklogic (hotel_code, booking_id, date, rm_no, price, res_id, insertdate)
-                                                VALUES (:hc, :bid, :dt, :rmno, :price, :rid, NOW())
-                                            ");
-                                            $insPerDayBL->execute([
-                                                ':hc'    => $HotelCode,
-                                                ':bid'   => $Booking_Id,
-                                                ':dt'    => $pDate,
-                                                ':rmno'  => $pRmNo,
-                                                ':price' => $pPrice,
-                                                ':rid'   => $Res_id
-                                            ]);
-                                        } catch (Exception $ePBL) {}
-
-                                        try {
                                             $insPerDay = $pdo->prepare("
                                                 INSERT INTO \"Reservation_PerDay_details\" (\"Hotel_Code\", \"Booking_Id\", \"Date\", \"rm_no\", \"Price\", \"Res_id\")
                                                 VALUES (:hc, :bid, :dt, :rmno, :price, :rid)
@@ -360,21 +371,43 @@ function runAutoSyncCycle($pdo, $api_url, $target_hotel = null, $force_avail = f
                                                 ':rid'   => $Res_id
                                             ]);
                                         } catch (Exception $ePD) {}
+
+                                        try {
+                                            $pdo->exec("SAVEPOINT sp_pd_bl");
+                                            $insPerDayBL = $pdo->prepare("
+                                                INSERT INTO reservation_perday_details_booklogic (hotel_code, booking_id, date, rm_no, price, res_id, insertdate)
+                                                VALUES (:hc, :bid, :dt, :rmno, :price, :rid, NOW())
+                                            ");
+                                            $insPerDayBL->execute([
+                                                ':hc'    => $HotelCode,
+                                                ':bid'   => $Booking_Id,
+                                                ':dt'    => $pDate,
+                                                ':rmno'  => $pRmNo,
+                                                ':price' => $pPrice,
+                                                ':rid'   => $Res_id
+                                            ]);
+                                            $pdo->exec("RELEASE SAVEPOINT sp_pd_bl");
+                                        } catch (Exception $ePBL) {
+                                            $pdo->exec("ROLLBACK TO SAVEPOINT sp_pd_bl");
+                                        }
                                     }
                                 }
                             }
 
                             $pdo->commit();
+                            $needMarkSend = true;
                             $stats['bookings_inserted']++;
                             logCli("Ingested Booking ID: {$Booking_Id} (Res_id: {$Res_id})", "SUCCESS");
                         } catch (Exception $e) {
                             $pdo->rollBack();
+                            $Res_id = null;
+                            $needMarkSend = false;
                             logCli("Failed to save booking {$Booking_Id}: " . $e->getMessage(), "ERROR");
                         }
                     }
 
-                    // Send markSendRQ for new booking
-                    if ($PnrID && $Res_id) {
+                    // Send markSendRQ ONLY if booking is confirmed stored in PostgreSQL
+                    if ($PnrID && $Res_id && $needMarkSend) {
                         $curl = curl_init();
                         curl_setopt_array($curl, array(
                             CURLOPT_URL => "https://xrs.booklogic.net/ws/external-pms/microgenn",

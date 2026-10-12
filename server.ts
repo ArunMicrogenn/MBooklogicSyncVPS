@@ -1292,17 +1292,7 @@ app.post('/api/booklogic/sync-bookings', async (req, res) => {
             const newResId = insRes.rows[0].Res_id;
 
             // Details into reservations_details_booklogic (and Reservations_details)
-            try {
-              await pgClient.query(`
-                INSERT INTO reservations_details_booklogic (
-                  res_id, noofrooms, roomtype, checkindate, checkoutdate,
-                  netprice, roomtotal, extrastotal, mealtotal, total,
-                  taxincluded, taxexcluded, rate_name, rate_id, availability_id,
-                  availability_name, room_id, room_name, insertdate
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW());
-              `, [newResId, rooms, roomType, checkin, checkout, netPrice, roomTotal, extrasTotal, mealTotal, total, taxInc, taxExc, rateName, rateId, availId, availName, roomId, roomName]);
-            } catch (eBL) {}
-
+            // Details into Reservations_details
             try {
               await pgClient.query(`
                 INSERT INTO "Reservations_details" (
@@ -1321,18 +1311,11 @@ app.post('/api/booklogic/sync-bookings', async (req, res) => {
               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
             `, [newResId, firstName, lastName, email, tel, address, zip, location, country]);
 
-            // PerDay into reservation_perday_details_booklogic (and Reservation_PerDay_details)
+            // PerDay into Reservation_PerDay_details
             for (const pd of perDayArr) {
               const pDate = pd['@_date'] || pd.date || '';
               const pRmNo = String(pd['@_rm_no'] || pd.rm_no || '1');
               const pPrice = String(pd.Price || pd['#text'] || '0');
-
-              try {
-                await pgClient.query(`
-                  INSERT INTO reservation_perday_details_booklogic (hotel_code, booking_id, date, rm_no, price, res_id, insertdate)
-                  VALUES ($1, $2, $3, $4, $5, $6, NOW());
-                `, [HotelCode, bookingId, pDate, pRmNo, pPrice, newResId]);
-              } catch (ePBL) {}
 
               try {
                 await pgClient.query(`
@@ -1343,18 +1326,41 @@ app.post('/api/booklogic/sync-bookings', async (req, res) => {
             }
 
             // Log
-            await pgClient.query(`
-              INSERT INTO "Reservations_log" (
-                "Hotel_Code", "Booking_Id", "syncType", "PnrID", "ExternalReference",
-                "ExternalReservationRoomId", "ExternalReservationId", "deposit", "Service",
-                "TravelagentName", "UpdateDate", "modifyDate", "cancelDate", "Currency",
-                "Status", "Adult", "ChildB", "ChildA", "Infant", "Remarks", "Insertdate"
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21);
-            `, [HotelCode, bookingId, syncType, pnrId, extRef, extResRoomId, extResId, deposit, service, travelAgent, updateDate, modifyDate, cancelDate, currency, status, adult, childB, childA, infant, remarks, insertDate]);
+            try {
+              await pgClient.query(`
+                INSERT INTO "Reservations_log" (
+                  "Hotel_Code", "Booking_Id", "syncType", "PnrID", "ExternalReference",
+                  "ExternalReservationRoomId", "ExternalReservationId", "deposit", "Service",
+                  "TravelagentName", "UpdateDate", "modifyDate", "cancelDate", "Currency",
+                  "Status", "Adult", "ChildB", "ChildA", "Infant", "Remarks", "Insertdate"
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21);
+              `, [HotelCode, bookingId, syncType, pnrId, extRef, extResRoomId, extResId, deposit, service, travelAgent, updateDate, modifyDate, cancelDate, currency, status, adult, childB, childA, infant, remarks, insertDate]);
+            } catch (eLog) {}
 
             await pgClient.query('COMMIT');
             totalInserted++;
             addLog('success', `Ingested Booking ID [${bookingId}] (Postgres Res_id: ${newResId}) for Guest "${firstName} ${lastName}" ($${total})`);
+
+            // Transmit markSendRQ to BookLogic to acknowledge receipt
+            if (pnrId && newResId) {
+              try {
+                const msPayload = `<markSendRQ>\r\n<RequestorID>\r\n<UserName>${Username}</UserName>\r\n<Password>${Password}</Password>\r\n</RequestorID>\r\n<hotelCode>${HotelCode}</hotelCode>\r\n<PnrID>${pnrId}</PnrID>\r\n<SrvNum>${newResId}</SrvNum>\r\n</markSendRQ>`;
+                const msRes = await fetch('https://xrs.booklogic.net/ws/external-pms/microgenn', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'text/xml', 'cache-control': 'no-cache' },
+                  body: msPayload,
+                });
+                const msText = await msRes.text();
+                await pgClient.query('UPDATE "Reservations" SET "MarkSend" = 1 WHERE "Res_id" = $1', [newResId]);
+                await pgClient.query(`
+                  INSERT INTO public.marksend_response (hotel_code, booking_id, service, pnrid, message, type, insertdate)
+                  VALUES ($1, $2, $3, $4, $5, 'B', NOW());
+                `, [HotelCode, bookingId, String(newResId), pnrId, msText.substring(0, 900)]);
+                addLog('success', `Transmitted <markSendRQ> acknowledgment for Booking [${bookingId}] (Res_id: ${newResId})`);
+              } catch (msErr: any) {
+                addLog('warn', `Failed to send markSendRQ for [${bookingId}]: ${msErr.message}`);
+              }
+            }
           } else {
             // Sandbox store
             const newResId = bookLogicSandbox.reservations.length + 1;
@@ -1733,150 +1739,169 @@ async function executeFullAutoSyncCycle(customConfig?: any) {
     addLog('warn', `Connected to Sandbox DB for Auto-Sync (${dbErr.message})`);
   }
 
-  const sampleBookings = [
-    {
-      Booking_Id: `BL_AUTO_${Date.now()}`,
-      syncType: 'N',
-      PnrID: `PNR_AUTO_${Math.floor(1000 + Math.random() * 9000)}`,
-      ExternalReference: `EXT_AUTO_${Math.floor(100000 + Math.random() * 900000)}`,
-      deposit: 0,
-      Service: 'Room',
-      TravelagentName: 'BookLogic Direct / Agoda',
-      UpdateDate: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      Currency: 'USD',
-      Status: 'Confirmed',
-      Adult: 2,
-      Remarks: 'Automated 4-phase channel sync ingest',
-      Customer: {
-        FirstName: 'Arun',
-        LastName: 'Microgenn',
-        Email: 'arunmicrogenn@gmail.com',
-        Tel: '+1-555-0199',
-        Country: 'US'
-      },
-      RoomDetails: [
-        {
-          NoofRooms: 1,
-          RoomType: 'Deluxe Ocean View',
-          Checkindate: '2026-10-01',
-          Checkoutdate: '2026-10-05',
-          Total: 480.00,
-          rate_name: 'Standard BAR Rate',
-          Room_Name: 'Deluxe Suite'
-        }
-      ]
-    }
-  ];
-
   for (const hotel of activeHotels) {
     const hotelCode = hotel.HotelCode;
-    addLog('info', `Ingesting bookings for Hotel Property [${hotelCode}]...`);
-    stats.bookingsFetched += sampleBookings.length;
+    const username = hotel.Username;
+    const password = hotel.Password;
+    if (!hotelCode || !username || !password) continue;
 
-    for (const b of sampleBookings) {
-      if (pgClient) {
-        try {
-          const dupCheck = await pgClient.query('SELECT "Res_id" FROM "Reservations" WHERE "Booking_Id" = $1 AND "syncType" = $2', [b.Booking_Id, b.syncType]);
-          if (dupCheck.rows.length === 0) {
-            await pgClient.query('BEGIN');
-            const resInsert = await pgClient.query(`
-              INSERT INTO "Reservations" (
-                "Hotel_Code", "Booking_Id", "syncType", "PnrID", "ExternalReference",
-                "deposit", "Service", "TravelagentName", "UpdateDate", "modifyDate", "cancelDate", "Currency",
-                "Status", "Adult", "Remarks", "Insertdate", "MarkSend"
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), 0)
-              RETURNING "Res_id";
-            `, [hotelCode, b.Booking_Id, b.syncType, b.PnrID, b.ExternalReference, b.deposit, b.Service, b.TravelagentName, b.UpdateDate, b.UpdateDate, '', b.Currency, b.Status, b.Adult, b.Remarks]);
-            
-            const newResId = resInsert.rows[0].Res_id;
-
-            await pgClient.query(`
-              INSERT INTO "Reservation_Customer" ("Res_id", "FirstName", "LastName", "Email", "Tel", "Country")
-              VALUES ($1, $2, $3, $4, $5, $6);
-            `, [newResId, b.Customer.FirstName, b.Customer.LastName, b.Customer.Email, b.Customer.Tel, b.Customer.Country]);
-
-            for (const r of b.RoomDetails) {
-              try {
-                await pgClient.query(`
-                  INSERT INTO reservations_details_booklogic (res_id, noofrooms, roomtype, checkindate, checkoutdate, total, rate_name, room_name, insertdate)
-                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW());
-                `, [newResId, r.NoofRooms, r.RoomType, r.Checkindate, r.Checkoutdate, r.Total, r.rate_name, r.Room_Name]);
-              } catch (eBL) {}
-
-              try {
-                await pgClient.query(`
-                  INSERT INTO "Reservations_details" ("Res_id", "NoofRooms", "RoomType", "Checkindate", "Checkoutdate", "Total", "rate_name", "Room_Name")
-                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
-                `, [newResId, r.NoofRooms, r.RoomType, r.Checkindate, r.Checkoutdate, r.Total, r.rate_name, r.Room_Name]);
-              } catch (eDet) {}
-            }
-
-            // Insert reservation_perday_details_booklogic and Reservation_PerDay_details linked with Res_id
-            try {
-              await pgClient.query(`
-                INSERT INTO reservation_perday_details_booklogic (hotel_code, booking_id, date, rm_no, price, res_id, insertdate)
-                VALUES ($1, $2, $3, $4, $5, $6, NOW());
-              `, [hotelCode, b.Booking_Id, b.RoomDetails[0]?.Checkindate || new Date().toISOString().substring(0, 10), '1', String(b.RoomDetails[0]?.Total || '0'), newResId]);
-            } catch (ePBL) {}
-
-            try {
-              await pgClient.query(`
-                INSERT INTO "Reservation_PerDay_details" ("Hotel_Code", "Booking_Id", "Date", "rm_no", "Price", "Res_id")
-                VALUES ($1, $2, $3, $4, $5, $6);
-              `, [hotelCode, b.Booking_Id, b.RoomDetails[0]?.Checkindate || new Date().toISOString().substring(0, 10), '1', String(b.RoomDetails[0]?.Total || '0'), newResId]);
-            } catch (ePD) {}
-
-            await pgClient.query('COMMIT');
-            stats.bookingsInserted++;
-            addLog('success', `[Phase 1] Ingested Booking [${b.Booking_Id}] -> PostgreSQL Res_id #${newResId} ($${b.RoomDetails[0].Total})`);
-          }
-        } catch (e: any) {
-          if (pgClient) await pgClient.query('ROLLBACK').catch(() => {});
-          addLog('error', `Booking insert failed for ${b.Booking_Id}: ${e.message}`);
-        }
-      } else {
-        const newResId = bookLogicSandbox.reservations.length + 1;
-        bookLogicSandbox.reservations.unshift({
-          Res_id: newResId,
-          Hotel_Code: hotelCode,
-          Booking_Id: b.Booking_Id,
-          syncType: b.syncType,
-          PnrID: b.PnrID,
-          ExternalReference: b.ExternalReference,
-          deposit: b.deposit,
-          Service: b.Service,
-          TravelagentName: b.TravelagentName,
-          UpdateDate: b.UpdateDate,
-          Currency: b.Currency,
-          Status: b.Status,
-          Adult: b.Adult,
-          Remarks: b.Remarks,
-          Insertdate: new Date().toISOString(),
-          MarkSend: 0
+    addLog('info', `Checking BookLogic incoming queue for Hotel Property [${hotelCode}]...`);
+    try {
+      const xmlPayload = `<syncBookingRQ>\r\n<RequestorID>\r\n<UserName>${username}</UserName>\r\n<Password>${password}</Password>\r\n</RequestorID>\r\n<hotelCode>${hotelCode}</hotelCode>\r\n</syncBookingRQ>`;
+      let responseText = '';
+      try {
+        const blRes = await fetch('https://xrs.booklogic.net/ws/external-pms/microgenn', {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/xml; charset=utf-8', 'cache-control': 'no-cache' },
+          body: xmlPayload,
         });
-        bookLogicSandbox.customers.unshift({
-          id: bookLogicSandbox.customers.length + 1,
-          Res_id: newResId,
-          FirstName: b.Customer.FirstName,
-          LastName: b.Customer.LastName,
-          Email: b.Customer.Email,
-          Tel: b.Customer.Tel,
-          Country: b.Customer.Country
-        });
-        bookLogicSandbox.details.unshift({
-          id: bookLogicSandbox.details.length + 1,
-          Res_id: newResId,
-          NoofRooms: b.RoomDetails[0].NoofRooms,
-          RoomType: b.RoomDetails[0].RoomType,
-          Checkindate: b.RoomDetails[0].Checkindate,
-          Checkoutdate: b.RoomDetails[0].Checkoutdate,
-          Total: b.RoomDetails[0].Total,
-          rate_name: b.RoomDetails[0].rate_name,
-          Room_Name: b.RoomDetails[0].Room_Name
-        });
-        stats.bookingsInserted++;
-        addLog('success', `[Phase 1 Sandbox] Ingested Booking [${b.Booking_Id}] -> Res_id #${newResId}`);
+        responseText = await blRes.text();
+      } catch (fErr: any) {
+        addLog('warn', `Network error contacting BookLogic for [${hotelCode}]: ${fErr.message}`);
+        continue;
       }
+
+      if (!responseText) continue;
+
+      const parsed = xmlParser.parse(responseText);
+      const hotelNode = parsed?.Hotel || parsed?.hotel || parsed?.syncBookingRS?.Hotel || parsed?.syncBookingRS?.hotel;
+      const bookingsNode = hotelNode?.Bookings || hotelNode?.bookings || parsed?.syncBookingRS?.Bookings;
+      const rawBooking = bookingsNode?.Booking || bookingsNode?.booking;
+
+      if (!rawBooking) {
+        addLog('info', `No pending bookings in queue for Hotel [${hotelCode}].`);
+        continue;
+      }
+
+      const bookingsList = Array.isArray(rawBooking) ? rawBooking : [rawBooking];
+      stats.bookingsFetched += bookingsList.length;
+      addLog('info', `Received ${bookingsList.length} booking(s) for Hotel [${hotelCode}]`);
+
+      for (const b of bookingsList) {
+        const bookingId = String(b['@_id'] || b.id || b.Booking_Id || '');
+        if (!bookingId) continue;
+        const syncType = String(b.syncType || 'NEW');
+        const pnrId = String(b.PnrID || '');
+        const extRef = String(b.ExternalReference || '');
+        const deposit = String(b.deposit || '0.00');
+        const service = String(b.Service || '');
+        const travelAgent = String(b.TravelagentName || b.TravelagentCode || 'BookLogic Channel');
+        const extResRoomId = String(b.ExternalReservationRoomId || '');
+        const extResId = String(b.ExternalReservationId || '');
+        const updateDate = String(b.UpdateDate || new Date().toISOString().replace('T', ' ').substring(0, 19));
+        const modifyDate = String(b.modifyDate || updateDate);
+        const cancelDate = String(b.cancelDate || '');
+        const currency = String(b.Currency || 'INR');
+        const status = String(b.Status || 'Confirmed');
+        const adult = String(b.Adult || '1');
+        const childB = String(b.ChildB || '0');
+        const childA = String(b.ChildA || '0');
+        const infant = String(b.Infant || '0');
+        const remarks = String(b.Remarks || '');
+
+        if (pgClient) {
+          const dupRes = await pgClient.query('SELECT "Res_id", COALESCE("MarkSend", 0) as ms FROM "Reservations" WHERE "Booking_Id" = $1 AND "syncType" = $2', [bookingId, syncType]);
+          let newResId: number | null = null;
+          let shouldAck = false;
+
+          if (dupRes.rows.length > 0) {
+            newResId = dupRes.rows[0].Res_id;
+            shouldAck = dupRes.rows[0].ms === 0;
+            addLog('info', `Booking [${bookingId}] already in database (Res_id: ${newResId}).`);
+          } else {
+            try {
+              await pgClient.query('BEGIN');
+              const insRes = await pgClient.query(`
+                INSERT INTO "Reservations" (
+                  "Hotel_Code", "Booking_Id", "syncType", "PnrID", "ExternalReference",
+                  "ExternalReservationRoomId", "ExternalReservationId", "deposit", "Service",
+                  "TravelagentName", "UpdateDate", "modifyDate", "cancelDate", "Currency",
+                  "Status", "Adult", "ChildB", "ChildA", "Infant", "Remarks", "Insertdate", "MarkSend", "Updateflag"
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, NOW(), 0, 0)
+                RETURNING "Res_id";
+              `, [hotelCode, bookingId, syncType, pnrId, extRef, extResRoomId, extResId, deposit, service, travelAgent, updateDate, modifyDate, cancelDate, currency, status, adult, childB, childA, infant, remarks]);
+              newResId = insRes.rows[0].Res_id;
+
+              const cl = b.CL || b.Customer || {};
+              await pgClient.query(`
+                INSERT INTO "Reservation_Customer" (
+                  "Res_id", "FirstName", "LastName", "Email", "Tel", "address", "zip", "Location", "Country"
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+              `, [newResId, cl.FirstName || 'Valued', cl.LastName || 'Guest', cl.Email || '', cl.Tel || '', cl.address || '', cl.zip || '', cl.Location || '', cl.Country || '']);
+
+              // Details
+              const rawRooms = b.RoomDetails || b.Rooms || b.Room;
+              const roomsArr = Array.isArray(rawRooms) ? rawRooms : (rawRooms ? [rawRooms] : [b]);
+              for (const r of roomsArr) {
+                const rType = r.Room || r.RoomType || '';
+                const rTotal = String(r.Total || r.roomTotal || r.RoomTotal || '0');
+                const checkin = r.Checkin || r.Checkindate || new Date().toISOString().substring(0, 10);
+                const checkout = r.Checkout || r.Checkoutdate || new Date().toISOString().substring(0, 10);
+                const rName = typeof r.rate === 'object' ? String(r.rate['#text'] || '') : String(r.rate || r.rate_name || '');
+                const rmName = typeof r.rmName === 'object' ? String(r.rmName['#text'] || '') : String(r.rmName || r.Room_Name || '');
+                const rCnt = String(r.Rooms || r.NoofRooms || '1');
+
+                try {
+                  await pgClient.query(`
+                    INSERT INTO "Reservations_details" (
+                      "Res_id", "NoofRooms", "RoomType", "Checkindate", "Checkoutdate", "Total", "rate_name", "Room_Name"
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+                  `, [newResId, rCnt, rType, checkin, checkout, rTotal, rName, rmName]);
+                } catch (eDet) {}
+              }
+
+              // PerDay
+              const rawPd = b.PerDay;
+              const pdArr = Array.isArray(rawPd) ? rawPd : (rawPd ? [rawPd] : []);
+              for (const pd of pdArr) {
+                const pdDate = pd['@_date'] || pd.date || '';
+                const pdRmNo = String(pd['@_rm_no'] || pd.rm_no || '1');
+                const pdPrice = String(pd.Price || pd['#text'] || '0');
+                try {
+                  await pgClient.query(`
+                    INSERT INTO "Reservation_PerDay_details" ("Hotel_Code", "Booking_Id", "Date", "rm_no", "Price", "Res_id")
+                    VALUES ($1, $2, $3, $4, $5, $6);
+                  `, [hotelCode, bookingId, pdDate, pdRmNo, pdPrice, newResId]);
+                } catch (ePD) {}
+              }
+
+              await pgClient.query('COMMIT');
+              shouldAck = true;
+              stats.bookingsInserted++;
+              addLog('success', `[Phase 1] Ingested Booking [${bookingId}] -> PostgreSQL Res_id #${newResId}`);
+            } catch (insErr: any) {
+              await pgClient.query('ROLLBACK').catch(() => {});
+              newResId = null;
+              shouldAck = false;
+              addLog('error', `Booking insert failed for ${bookingId}: ${insErr.message}`);
+            }
+          }
+
+          // Real markSendRQ only if booking is safely committed in DB
+          if (newResId && shouldAck && pnrId) {
+            try {
+              const msPayload = `<markSendRQ>\r\n<RequestorID>\r\n<UserName>${username}</UserName>\r\n<Password>${password}</Password>\r\n</RequestorID>\r\n<hotelCode>${hotelCode}</hotelCode>\r\n<PnrID>${pnrId}</PnrID>\r\n<SrvNum>${newResId}</SrvNum>\r\n</markSendRQ>`;
+              const msRes = await fetch('https://xrs.booklogic.net/ws/external-pms/microgenn', {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/xml', 'cache-control': 'no-cache' },
+                body: msPayload,
+              });
+              const msText = await msRes.text();
+              await pgClient.query('UPDATE "Reservations" SET "MarkSend" = 1 WHERE "Res_id" = $1', [newResId]);
+              await pgClient.query(`
+                INSERT INTO public.marksend_response (hotel_code, booking_id, service, pnrid, message, type, insertdate)
+                VALUES ($1, $2, $3, $4, $5, 'B', NOW());
+              `, [hotelCode, bookingId, String(newResId), pnrId, msText.substring(0, 900)]);
+              stats.markSendAcked++;
+              addLog('success', `[Phase 1] Transmitted <markSendRQ> to BookLogic for Booking [${bookingId}] (Res_id: ${newResId})`);
+            } catch (msErr: any) {
+              addLog('warn', `Failed to send markSendRQ for ${bookingId}: ${msErr.message}`);
+            }
+          }
+        }
+      }
+    } catch (hotelErr: any) {
+      addLog('warn', `Sync error for Hotel [${hotelCode}]: ${hotelErr.message}`);
     }
   }
 
@@ -1887,7 +1912,7 @@ async function executeFullAutoSyncCycle(customConfig?: any) {
   try {
     let pendingAcks: any[] = [];
     if (pgClient) {
-      const pRes = await pgClient.query('SELECT r.*, h.username as "Username", h.password as "Password" FROM "Reservations" r JOIN mas_hotel h ON r."Hotel_Code" = h.hotelcode WHERE COALESCE(r."MarkSend", 0) = 0 LIMIT 10;');
+      const pRes = await pgClient.query('SELECT r.*, h.username as "Username", h.password as "Password" FROM "Reservations" r JOIN mas_hotel h ON LOWER(TRIM(r."Hotel_Code")) = LOWER(TRIM(h.hotelcode)) WHERE COALESCE(r."MarkSend", 0) = 0 LIMIT 20;');
       pendingAcks = pRes.rows;
     } else {
       pendingAcks = bookLogicSandbox.reservations.filter(r => !r.MarkSend).slice(0, 10);
@@ -1895,11 +1920,24 @@ async function executeFullAutoSyncCycle(customConfig?: any) {
 
     for (const row of pendingAcks) {
       if (pgClient) {
+        let ackMsg = 'Acknowledged';
+        try {
+          const msPayload = `<markSendRQ>\r\n<RequestorID>\r\n<UserName>${row.Username}</UserName>\r\n<Password>${row.Password}</Password>\r\n</RequestorID>\r\n<hotelCode>${row.Hotel_Code}</hotelCode>\r\n<PnrID>${row.PnrID}</PnrID>\r\n<SrvNum>${row.Res_id}</SrvNum>\r\n</markSendRQ>`;
+          const msRes = await fetch('https://xrs.booklogic.net/ws/external-pms/microgenn', {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/xml', 'cache-control': 'no-cache' },
+            body: msPayload,
+          });
+          ackMsg = (await msRes.text()).substring(0, 900);
+        } catch (e: any) {
+          ackMsg = e.message;
+        }
+
         await pgClient.query('UPDATE "Reservations" SET "MarkSend" = 1 WHERE "Res_id" = $1', [row.Res_id]);
         await pgClient.query(`
           INSERT INTO public.marksend_response (hotel_code, booking_id, service, pnrid, message, type, insertdate)
           VALUES ($1, $2, $3, $4, $5, 'B', NOW());
-        `, [row.Hotel_Code, row.Booking_Id, String(row.Res_id), row.PnrID || 'PNR1000', 'Auto-Sync Acknowledged Successfully']);
+        `, [row.Hotel_Code, row.Booking_Id, String(row.Res_id), row.PnrID || 'PNR1000', ackMsg]);
       } else {
         const itm = bookLogicSandbox.reservations.find(r => r.Res_id === row.Res_id);
         if (itm) itm.MarkSend = 1;

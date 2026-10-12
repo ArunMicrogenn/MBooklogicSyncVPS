@@ -98,6 +98,20 @@ Open your browser and navigate to:
 `http://72.61.240.34/booklogic/index.php`
 
 - **Sync Bookings**: Fetch reservations from BookLogic API (`<syncBookingRQ>`).
+
+---
+
+## 🔒 Proxy IP Configuration (Optional)
+
+If your VPS hosting provider restricts outbound connections or requires routing API requests through a proxy IP address, you can configure cURL proxy options in `sync_booklogic.php` and `cron_auto_sync.php`:
+
+```php
+// Add these lines right after curl_setopt($curl, CURLOPT_URL, ...);
+curl_setopt($curl, CURLOPT_PROXY, "YOUR_PROXY_IP:PORT");
+// If proxy requires authentication:
+// curl_setopt($curl, CURLOPT_PROXYUSERPWD, "username:password");
+```
+
 - **MarkSend**: Acknowledge unconfirmed bookings (`<markSendRQ>`).
 - **Room Availability**: Push datewise allotments & stop-sales (`<availabilityUpdateRQ>`).
 - **Room Rates**: Push single/double/triple occupancy pricing (`<RateUpdateRQ>`).
